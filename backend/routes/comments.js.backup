@@ -1,0 +1,113 @@
+const express = require("express");
+const db = require("../database");
+const { authenticateToken } = require("../middleware/auth");
+
+const router = express.Router();
+
+// GET comments for a ticket
+router.get(
+  "/ticket/:ticketId",
+  authenticateToken,
+  (req, res) => {
+    try {
+      const comments = db
+        .prepare(`
+          SELECT
+            ticket_comments.id,
+            ticket_comments.ticket_id,
+            ticket_comments.user_id,
+            ticket_comments.comment,
+            ticket_comments.created_at,
+            users.name AS user_name,
+            users.role AS user_role
+          FROM ticket_comments
+          JOIN users
+            ON ticket_comments.user_id = users.id
+          WHERE ticket_comments.ticket_id = ?
+          ORDER BY ticket_comments.created_at ASC
+        `)
+        .all(req.params.ticketId);
+
+      res.json(comments);
+    } catch (error) {
+      console.error("Failed to load comments:", error);
+
+      res.status(500).json({
+        message: "Failed to load comments.",
+      });
+    }
+  }
+);
+
+// ADD comment
+router.post(
+  "/ticket/:ticketId",
+  authenticateToken,
+  (req, res) => {
+    try {
+      const { comment } = req.body;
+
+      if (!comment || !comment.trim()) {
+        return res.status(400).json({
+          message: "Comment cannot be empty.",
+        });
+      }
+
+      // Check that ticket exists
+      const ticket = db
+        .prepare("SELECT id FROM tickets WHERE id = ?")
+        .get(req.params.ticketId);
+
+      if (!ticket) {
+        return res.status(404).json({
+          message: "Ticket not found.",
+        });
+      }
+
+      const result = db
+        .prepare(`
+          INSERT INTO ticket_comments (
+            ticket_id,
+            user_id,
+            comment
+          )
+          VALUES (?, ?, ?)
+        `)
+        .run(
+          req.params.ticketId,
+          req.user.id,
+          comment.trim()
+        );
+
+      const newComment = db
+        .prepare(`
+          SELECT
+            ticket_comments.id,
+            ticket_comments.ticket_id,
+            ticket_comments.user_id,
+            ticket_comments.comment,
+            ticket_comments.created_at,
+            users.name AS user_name,
+            users.role AS user_role
+          FROM ticket_comments
+          JOIN users
+            ON ticket_comments.user_id = users.id
+          WHERE ticket_comments.id = ?
+        `)
+        .get(result.lastInsertRowid);
+
+      res.status(201).json({
+        message: "Comment added successfully.",
+        comment: newComment,
+      });
+    } catch (error) {
+      console.error("Failed to add comment:", error);
+
+      res.status(500).json({
+        message: "Failed to add comment.",
+      });
+    }
+  }
+);
+
+module.exports = router;
