@@ -93,4 +93,42 @@ router.patch("/read-all", authenticateToken, (req, res) => {
   }
 });
 
+
+router.post("/check-sla", authenticateToken, (req, res) => {
+  try {
+    const now = new Date();
+    const limit = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+    const sqlDate = d => d.toISOString().slice(0, 19).replace("T", " ");
+    const tickets = db.prepare(`
+      SELECT id, ticket_number, title, requester_id, assigned_to
+      FROM tickets
+      WHERE sla_deadline > ? AND sla_deadline <= ?
+        AND status NOT IN ('Resolved', 'Closed')
+    `).all(sqlDate(now), sqlDate(limit));
+
+    const insert = db.prepare(`
+      INSERT INTO notifications (user_id, ticket_id, type, title, message)
+      SELECT ?, ?, 'sla_approaching', ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM notifications
+        WHERE user_id = ? AND ticket_id = ? AND type = 'sla_approaching'
+      )
+    `);
+    let created = 0;
+    for (const ticket of tickets) {
+      const recipients = [...new Set([ticket.requester_id, ticket.assigned_to].filter(x => x != null).map(Number))];
+      for (const userId of recipients) {
+        created += insert.run(userId, ticket.id,
+          `SLA deadline approaching: ${ticket.ticket_number}`,
+          `${ticket.title} is due within 2 hours.`,
+          userId, ticket.id).changes;
+      }
+    }
+    res.json({ message: "SLA notifications checked.", created });
+  } catch (error) {
+    console.error("Failed to check SLA notifications:", error);
+    res.status(500).json({ message: "Failed to check SLA notifications." });
+  }
+});
+
 module.exports = router;

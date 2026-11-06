@@ -2,12 +2,37 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../database");
-const { notifyUsers, createNotification } = require("../utils/notifications");
 const { authenticateToken } = require("../middleware/auth");
+
+function createNotification({ userId, ticketId = null, type = "general", title, message = "" }) {
+  if (userId == null || !title) return;
+  db.prepare("INSERT INTO notifications (user_id, ticket_id, type, title, message) VALUES (?, ?, ?, ?, ?)")
+    .run(Number(userId), ticketId, type, title, message);
+}
+function notifyUsers(userIds, payload) {
+  [...new Set((userIds || []).filter(id => id != null).map(Number))].forEach(userId => {
+    if (payload.excludeUserId != null && userId === Number(payload.excludeUserId)) return;
+    createNotification({ ...payload, userId });
+  });
+}
+
 
 // =========================
 // SLA STATUS HELPER
 // =========================
+
+function parseDatabaseDate(value) {
+  if (!value) return null;
+
+  const timestamp = String(value).trim().replace(" ", "T");
+  const hasTimezone = /(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(timestamp);
+
+  const date = new Date(
+    hasTimezone ? timestamp : `${timestamp}Z`
+  );
+
+  return Number.isNaN(date.getTime()) ? null : date;
+}
 
 function getSLAStatus(ticket) {
   const status = String(ticket.status || "").trim().toLowerCase();
@@ -21,39 +46,26 @@ function getSLAStatus(ticket) {
     return "Paused / On Hold";
   }
 
+  const dueAt = parseDatabaseDate(deadline);
+
   if (["resolved", "closed", "completed"].includes(status)) {
-    if (!deadline) {
+    if (!deadline) return "Met / Succeeded";
+
+    const resolvedAt = parseDatabaseDate(ticket.resolved_at);
+
+    if (resolvedAt && dueAt && resolvedAt <= dueAt) {
       return "Met / Succeeded";
-    }
-
-    if (ticket.resolved_at) {
-      const resolvedAt = new Date(ticket.resolved_at);
-      const dueAt = new Date(deadline);
-
-      if (
-        !Number.isNaN(resolvedAt.getTime()) &&
-        !Number.isNaN(dueAt.getTime()) &&
-        resolvedAt <= dueAt
-      ) {
-        return "Met / Succeeded";
-      }
     }
 
     return "Breached / Violated";
   }
 
-  if (!deadline) {
-    return "In Progress / Running";
-  }
+  if (!deadline) return "In Progress / Running";
 
-  const dueAt = new Date(deadline);
-  const createdAt = new Date(ticket.created_at);
+  const createdAt = parseDatabaseDate(ticket.created_at);
   const now = new Date();
 
-  if (
-    Number.isNaN(dueAt.getTime()) ||
-    Number.isNaN(createdAt.getTime())
-  ) {
+  if (!dueAt || !createdAt) {
     return "In Progress / Running";
   }
 
@@ -65,10 +77,7 @@ function getSLAStatus(ticket) {
 
   const totalDuration = dueAt.getTime() - createdAt.getTime();
 
-  if (
-    totalDuration > 0 &&
-    remaining / totalDuration <= 0.2
-  ) {
+  if (totalDuration > 0 && remaining / totalDuration <= 0.2) {
     return "Warning / At Risk";
   }
 
@@ -379,32 +388,48 @@ router.put("/:id", authenticateToken, (req, res) => {
       "assigned_to"
     );
 
-    // UPDATE TICKET
-    db.prepare(`
-      UPDATE tickets
-      SET
-        title = COALESCE(?, title),
-        description = COALESCE(?, description),
-        category = COALESCE(?, category),
-        priority = COALESCE(?, priority),
-        status = COALESCE(?, status),
-        assigned_to = CASE
-          WHEN ? = 1 THEN ?
-          ELSE assigned_to
-        END,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? OR ticket_number = ?
-    `).run(
-      title ?? null,
-      description ?? null,
-      category ?? null,
-      priority ?? null,
-      status ?? null,
-      hasAssignedTo ? 1 : 0,
-      hasAssignedTo && assigned_to !== "" ? assigned_to ?? null : null,
-      req.params.id,
-      req.params.id
-    );
+// UPDATE TICKET
+db.prepare(`
+  UPDATE tickets
+  SET
+    title = COALESCE(?, title),
+    description = COALESCE(?, description),
+    category = COALESCE(?, category),
+    priority = COALESCE(?, priority),
+    status = COALESCE(?, status),
+
+    assigned_to = CASE
+      WHEN ? = 1 THEN ?
+      ELSE assigned_to
+    END,
+
+    resolved_at = CASE
+      WHEN COALESCE(?, status) IN ('Resolved', 'Closed')
+        AND status NOT IN ('Resolved', 'Closed')
+        THEN CURRENT_TIMESTAMP
+
+      WHEN COALESCE(?, status) NOT IN ('Resolved', 'Closed')
+        THEN NULL
+
+      ELSE resolved_at
+    END,
+
+    updated_at = CURRENT_TIMESTAMP
+
+  WHERE id = ? OR ticket_number = ?
+`).run(
+  title ?? null,
+  description ?? null,
+  category ?? null,
+  priority ?? null,
+  status ?? null,
+  hasAssignedTo ? 1 : 0,
+  hasAssignedTo && assigned_to !== "" ? assigned_to ?? null : null,
+  status ?? null,
+  status ?? null,
+  req.params.id,
+  req.params.id
+);
 
     const updatedTicket = getFullTicket(req.params.id);
 
@@ -429,6 +454,22 @@ router.put("/:id", authenticateToken, (req, res) => {
             excludeUserId: actorId,
           }
         );
+      }
+
+      const generalFieldsChanged =
+        (title !== undefined && title !== existingTicket.title) ||
+        (description !== undefined && description !== existingTicket.description) ||
+        (category !== undefined && category !== existingTicket.category) ||
+        (priority !== undefined && priority !== existingTicket.priority);
+
+      if (generalFieldsChanged && !statusChanged && !assignmentChanged) {
+        notifyUsers([existingTicket.requester_id, updatedTicket.assigned_to], {
+          ticketId: updatedTicket.id,
+          type: "ticket_updated",
+          title: `Ticket ${updatedTicket.ticket_number} updated`,
+          message: `${updatedTicket.title} was updated.`,
+          excludeUserId: actorId,
+        });
       }
 
       if (assignmentChanged) {

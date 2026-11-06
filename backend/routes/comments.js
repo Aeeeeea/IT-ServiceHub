@@ -103,6 +103,22 @@ router.post("/ticket/:ticketId", authenticateToken, (req, res) => {
       `)
       .run(access.ticket.id, req.user.id, comment);
 
+    try {
+      const recipients = [...new Set(
+        [access.ticket.requester_id, access.ticket.assigned_to]
+          .filter(id => id != null).map(Number)
+      )];
+      recipients.forEach(userId => {
+        if (userId === Number(req.user.id)) return;
+        db.prepare("INSERT INTO notifications (user_id, ticket_id, type, title, message) VALUES (?, ?, ?, ?, ?)")
+          .run(userId, access.ticket.id, "ticket_comment",
+            `New comment on ${access.ticket.ticket_number}`,
+            `${req.user.name || "Someone"} added a comment.`);
+      });
+    } catch (notificationError) {
+      console.error("Comment added, but notification creation failed:", notificationError);
+    }
+
     res.status(201).json({
       message: "Comment added successfully.",
       comment: getCommentById(result.lastInsertRowid),
