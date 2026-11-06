@@ -8,6 +8,7 @@ const ticketRoutes = require("./routes/tickets");
 const userRoutes = require("./routes/users");
 const commentRoutes = require("./routes/comments");
 const notificationRoutes = require("./routes/notifications");
+const knowledgeBaseRoutes = require("./routes/knowledgebase");
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -49,6 +50,7 @@ app.use("/api/tickets", ticketRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/comments", commentRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/knowledge-base", knowledgeBaseRoutes);
 
 // Get single user by ID
 app.get("/api/users/:id", (req, res) => {
@@ -110,3 +112,4 @@ app.use((error, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`IT ServiceHub API running on http://localhost:${PORT}`);
 });
+

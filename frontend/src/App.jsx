@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+
 import {
   BrowserRouter,
   Routes,
@@ -8,7 +9,6 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
-
 import {
   BarChart,
   Bar,
@@ -42,6 +42,7 @@ import {
   ShieldCheck,
   UserPlus,
   Send,
+  BookOpen,
 } from "lucide-react";
 
 import "./App.css";
@@ -49,12 +50,22 @@ import "./App.css";
 /* =========================
    HELPER: SAFE DATE PARSER
 ========================= */
+
 const parseDate = (dateString) => {
   if (!dateString) return null;
+
   const formatted = String(dateString).trim().replace(" ", "T");
-  const parsed = new Date(formatted);
-  return isNaN(parsed.getTime()) ? null : parsed;
+
+  // SQLite timestamps without timezone information are stored in UTC.
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(formatted);
+
+  const parsed = new Date(
+    hasTimezone ? formatted : `${formatted}Z`
+  );
+
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
+
 
 /* =========================
    MAIN APP COMPONENT
@@ -446,18 +457,67 @@ function Register({ onRegisterSuccess, onBackToLogin }) {
 function AppLayout({ tickets, setTickets, currentUser, onLogout, onDelete }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
-  const notificationStorageKey =
-  `it-servicehub-read-alerts-${currentUser?.id || currentUser?.email || "user"}`;
+  const [notifications, setNotifications] = useState([]);
+  const token = localStorage.getItem("token");
+const notificationStorageKey = "readAlertIds";
 
 const [readAlertIds, setReadAlertIds] = useState(() => {
   try {
-    return JSON.parse(
+    const saved = JSON.parse(
       localStorage.getItem(notificationStorageKey) || "[]"
     );
+    return Array.isArray(saved) ? saved : [];
   } catch {
     return [];
   }
 });
+
+useEffect(() => {
+  localStorage.setItem(
+    notificationStorageKey,
+    JSON.stringify(readAlertIds)
+  );
+}, [readAlertIds]);
+  const loadNotifications = async () => {
+    if (!token) return;
+    try {
+      await fetch("http://localhost:5001/api/notifications/check-sla", {
+        method: "POST", headers: { Authorization: `Bearer ${token}` },
+      });
+      const response = await fetch("http://localhost:5001/api/notifications", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.ok) setNotifications(await response.json());
+    } catch (error) {
+      console.error("Failed to load notifications:", error);
+    }
+  };
+
+  useEffect(() => {
+    loadNotifications();
+    const timer = setInterval(loadNotifications, 60000);
+    return () => clearInterval(timer);
+  }, [currentUser?.id]);
+
+  const unreadNotifications = notifications.filter(n => !Number(n.is_read));
+
+  const markAllNotificationsRead = async () => {
+    try {
+      await fetch("http://localhost:5001/api/notifications/read-all", {
+        method: "PATCH", headers: { Authorization: `Bearer ${token}` },
+      });
+      setNotifications(current => current.map(n => ({ ...n, is_read: 1 })));
+    } catch (error) { console.error(error); }
+  };
+
+  const markNotificationRead = async (id) => {
+    try {
+      await fetch(`http://localhost:5001/api/notifications/${id}/read`, {
+        method: "PATCH", headers: { Authorization: `Bearer ${token}` },
+      });
+      setNotifications(current => current.map(n => n.id === id ? { ...n, is_read: 1 } : n));
+    } catch (error) { console.error(error); }
+  };
 
   const userName = currentUser?.name || "User";
   const userRole = currentUser?.role
@@ -487,27 +547,17 @@ const [readAlertIds, setReadAlertIds] = useState(() => {
   (ticket) => !readAlertIds.includes(String(ticket.id))
 );
 
-const markAllNotificationsRead = () => {
-  const allUrgentIds = urgentTickets.map((ticket) => String(ticket.id));
-  const updatedIds = [...new Set([...readAlertIds, ...allUrgentIds])];
-
-  setReadAlertIds(updatedIds);
-  localStorage.setItem(notificationStorageKey, JSON.stringify(updatedIds));
-};
-
-const markNotificationRead = (ticketId) => {
-  const id = String(ticketId);
-
-  if (readAlertIds.includes(id)) return;
-
-  const updatedIds = [...readAlertIds, id];
-  setReadAlertIds(updatedIds);
-  localStorage.setItem(notificationStorageKey, JSON.stringify(updatedIds));
-};
+useEffect(() => {
+  localStorage.setItem(
+    notificationStorageKey,
+    JSON.stringify(readAlertIds)
+  );
+}, [readAlertIds]);
 
   const navItems = [
     { path: "/", label: "Dashboard", icon: LayoutDashboard },
     { path: "/tickets", label: "Tickets", icon: Ticket },
+    { path: "/knowledge-base", label: "Knowledge Base", icon: BookOpen },
     { path: "/sla", label: "SLA Management", icon: Clock3 },
     { path: "/analytics", label: "Analytics", icon: BarChart3 },
     { path: "/users", label: "Users", icon: Users },
@@ -580,115 +630,60 @@ const markNotificationRead = (ticketId) => {
     type="button"
     className={`notification-trigger ${showNotifications ? "is-open" : ""}`}
     title="Notifications"
-    aria-label={`Notifications, ${unreadTickets.length} unread`}
+    aria-label={`Notifications, ${unreadNotifications.length} unread`}
     aria-expanded={showNotifications}
     onClick={() => setShowNotifications((open) => !open)}
   >
     <Bell size={21} strokeWidth={2} />
 
-    {unreadTickets.length > 0 && (
+    {unreadNotifications.length > 0 && (
       <span className="notification-count">
-        {unreadTickets.length > 99 ? "99+" : unreadTickets.length}
+        {unreadNotifications.length > 99 ? "99+" : unreadNotifications.length}
       </span>
     )}
   </button>
 
   {showNotifications && (
     <>
-      <button
-        type="button"
-        className="notification-backdrop"
-        aria-label="Close notifications"
-        onClick={() => setShowNotifications(false)}
-      />
-
+      <button type="button" className="notification-backdrop" aria-label="Close notifications" onClick={() => setShowNotifications(false)} />
       <div className="notification-dropdown">
         <div className="notification-header">
-          <div>
-            <strong>Notifications</strong>
-            <span>
-              {unreadTickets.length > 0
-                ? `${unreadTickets.length} unread alert${unreadTickets.length === 1 ? "" : "s"}`
-                : "You're all caught up"}
-            </span>
-          </div>
-
-          {unreadTickets.length > 0 && (
-            <button
-              type="button"
-              className="notification-read-all"
-              onClick={markAllNotificationsRead}
-            >
-              Mark all read
-            </button>
-          )}
+          <div><strong>Notifications</strong><span>{unreadNotifications.length ? `${unreadNotifications.length} unread` : "You're all caught up"}</span></div>
+          {unreadNotifications.length > 0 && <button type="button" className="notification-read-all" onClick={markAllNotificationsRead}>Mark all read</button>}
         </div>
-
-        <div className="notification-summary">
-          <span className="notification-summary-icon">
-            <AlertTriangle size={17} />
-          </span>
-          <div>
-            <strong>SLA alerts</strong>
-            <span>
-              {urgentTickets.length} active ticket
-              {urgentTickets.length === 1 ? "" : "s"} need attention
-            </span>
-          </div>
-        </div>
-
         <div className="notification-list">
-          {urgentTickets.length === 0 ? (
+          {notifications.length === 0 ? (
             <div className="notification-empty">
-              <span className="notification-empty-icon">
-                <Bell size={24} />
-              </span>
-              <strong>No urgent SLA alerts</strong>
-              <p>You're all caught up. Great work!</p>
+              <span className="notification-empty-icon"><Bell size={24} /></span>
+              <strong>No notifications yet</strong>
+              <p>Ticket updates and SLA reminders will appear here.</p>
             </div>
-          ) : (
-            urgentTickets.map((ticket) => {
-              const isUnread = !readAlertIds.includes(String(ticket.id));
-
-              return (
-                <Link
-                  key={ticket.id}
-                  to={`/tickets/${ticket.id}`}
-                  className={`notification-item ${isUnread ? "is-unread" : ""}`}
-                  onClick={() => {
-                    markNotificationRead(ticket.id);
-                    setShowNotifications(false);
-                  }}
-                >
-                  <span className="notification-item-icon">
-                    <AlertTriangle size={17} />
-                  </span>
-
-                  <span className="notification-item-content">
-                    <span className="notification-item-title">
-                      Ticket #{ticket.ticket_number || ticket.id}
-                    </span>
-                    <span className="notification-item-description">
-                      {ticket.title || "Untitled ticket"}
-                    </span>
-                    <span className="notification-item-meta">
-                      SLA deadline requires attention
-                    </span>
-                  </span>
-
-                  {isUnread && (
-                    <span className="notification-unread-dot" />
-                  )}
-                </Link>
-              );
-            })
-          )}
+          ) : notifications.map(notification => (
+            <Link
+              key={notification.id}
+              to={notification.ticket_id ? `/tickets/${notification.ticket_id}` : "/knowledge-base"}
+              className={`notification-item ${!Number(notification.is_read) ? "is-unread" : ""}`}
+              onClick={() => {
+                if (!Number(notification.is_read)) markNotificationRead(notification.id);
+                setShowNotifications(false);
+              }}
+            >
+              <span className="notification-item-icon">
+                {notification.type === "sla_approaching" ? <AlertTriangle size={17} /> : <Bell size={17} />}
+              </span>
+              <span className="notification-item-content">
+                <span className="notification-item-title">{notification.title}</span>
+                <span className="notification-item-description">{notification.message}</span>
+                <span className="notification-item-meta">
+                  {notification.ticket_number ? `${notification.ticket_number} · ` : ""}
+                  {notification.created_at ? new Date(String(notification.created_at).replace(" ", "T") + (String(notification.created_at).includes("Z") ? "" : "Z")).toLocaleString() : ""}
+                </span>
+              </span>
+              {!Number(notification.is_read) && <span className="notification-unread-dot" />}
+            </Link>
+          ))}
         </div>
-
-        <div className="notification-footer">
-          <span>IT ServiceHub</span>
-          <span>SLA monitoring</span>
-        </div>
+        <div className="notification-footer"><span>IT ServiceHub</span><span>Ticket notifications</span></div>
       </div>
     </>
   )}
@@ -737,7 +732,7 @@ const markNotificationRead = (ticketId) => {
                 />
               }
             />
-            <Route path="/sla" element={<SLAManagement tickets={tickets} />} />
+            <Route path="/knowledge-base" element={<KnowledgeBase />} />\n            <Route path="/sla" element={<SLAManagement tickets={tickets} />} />
             <Route path="/analytics" element={<Analytics tickets={tickets} />} />
             <Route
               path="/users"
@@ -749,6 +744,7 @@ const markNotificationRead = (ticketId) => {
         </section>
       </main>
     </div>
+    
   );
 }
 
@@ -756,7 +752,170 @@ const markNotificationRead = (ticketId) => {
    DASHBOARD
 ========================= */
 
-function Dashboard({ tickets }) {
+// ==========================================
+// SHARED SLA CALCULATION
+// Used by Dashboard and Analytics
+// ==========================================
+
+const getSlaCategory = (ticket) => {
+
+  const status = String(ticket.sla_status || "").trim();
+
+  const normalized = status.toLowerCase();
+
+  if (
+    ["met / succeeded", "met", "succeeded"].includes(normalized)
+  ) {
+    return "Met";
+  }
+
+  if (
+    [
+      "in progress / running",
+      "within sla",
+      "running",
+      "active",
+    ].includes(normalized)
+  ) {
+    return "Within SLA";
+  }
+
+  if (
+    [
+      "warning / at risk",
+      "at risk",
+      "warning",
+    ].includes(normalized)
+  ) {
+    return "At Risk";
+  }
+
+  if (
+    [
+      "breached / violated",
+      "breached",
+      "violated",
+    ].includes(normalized)
+  ) {
+    return "Breached";
+  }
+
+  if (
+    [
+      "cancelled / detached",
+      "cancelled",
+      "canceled",
+      "detached",
+    ].includes(normalized)
+  ) {
+    return "Cancelled";
+  }
+
+  if (
+    [
+      "paused / on hold",
+      "paused",
+      "on hold",
+    ].includes(normalized)
+  ) {
+    return "Paused";
+  }
+
+  return "Unknown";
+};
+
+// Support the possible API deadline field names.
+const hasSlaDeadline = (ticket) =>
+  Boolean(
+    ticket.sla_deadline ||
+    ticket.due_date ||
+    ticket.sla_due_date
+  );
+
+// Shared metrics for both pages.
+const calculateTicketMetrics = (tickets = []) => {
+  const ticketsWithSLA = tickets.filter(hasSlaDeadline); 
+  const ticketsWithoutSLA = tickets.filter(
+  (ticket) => !hasSlaDeadline(ticket)
+);
+
+  const slaCounts = {
+    within: 0,
+    risk: 0,
+    breached: 0,
+    met: 0,
+    cancelled: 0,
+    paused: 0,
+    unknown: 0,
+  };
+
+  ticketsWithSLA.forEach((ticket) => {
+    const category = getSlaCategory(ticket);
+
+    if (category === "Within SLA") slaCounts.within++;
+    else if (category === "At Risk") slaCounts.risk++;
+    else if (category === "Breached") slaCounts.breached++;
+    else if (category === "Met") slaCounts.met++;
+    else if (category === "Cancelled") slaCounts.cancelled++;
+    else if (category === "Paused") slaCounts.paused++;
+    else slaCounts.unknown++;
+  });
+
+  // Only resolved or closed tickets count toward SLA compliance.
+  const completedSLATickets = ticketsWithSLA.filter((ticket) => {
+    const status = String(ticket.status || "").toLowerCase();
+    const category = getSlaCategory(ticket);
+
+    return (
+      (status === "resolved" || status === "closed") &&
+      (category === "Met" || category === "Breached")
+    );
+  });
+
+  const completedMetTickets = completedSLATickets.filter(
+    (ticket) => getSlaCategory(ticket) === "Met"
+  );
+
+  const slaCompliance =
+    completedSLATickets.length > 0
+      ? (
+          (completedMetTickets.length / completedSLATickets.length) * 100
+        ).toFixed(1)
+      : "0.0";
+
+  return {
+    ticketsWithSLA,
+    ticketsWithoutSLA,
+    slaCounts,
+    completedSLATickets,
+    slaCompliance,
+  };
+};
+
+
+function Dashboard({ tickets = [] }) {
+  console.table(
+  tickets.map((ticket) => ({
+    id: ticket.id,
+    title: ticket.title,
+    status: ticket.status,
+    sla_status: ticket.sla_status,
+    sla_deadline: ticket.sla_deadline,
+    sla_target_hours: ticket.sla_target_hours,
+  }))
+);
+  console.log("DASHBOARD SLA DATA:", tickets);
+  console.table(
+    tickets.map((ticket) => ({
+      id: ticket.id,
+      title: ticket.title,
+      status: ticket.status,
+      sla_status: ticket.sla_status,
+      sla_deadline: ticket.sla_deadline || ticket.due_date || ticket.sla_due_date,
+      sla_target_hours: ticket.sla_target_hours,
+    }))
+  );
+
   const totalTickets = tickets.length;
 
   const openTickets = tickets.filter(
@@ -767,16 +926,17 @@ function Dashboard({ tickets }) {
     (ticket) => ticket.status === "Resolved" || ticket.status === "Closed"
   ).length;
 
-  const ticketsWithSLA = tickets.filter((ticket) => ticket.sla_deadline);
 
-  const compliantTickets = ticketsWithSLA.filter(
-    (ticket) => ticket.sla_status !== "Breached"
-  );
-
-  const slaCompliance =
-    ticketsWithSLA.length > 0
-      ? ((compliantTickets.length / ticketsWithSLA.length) * 100).toFixed(1)
-      : "0.0";
+const {
+  ticketsWithSLA,
+  ticketsWithoutSLA,
+  slaCounts,
+  completedSLATickets,
+  slaCompliance,
+} = calculateTicketMetrics(tickets);
+const successfulSLATickets = completedSLATickets.filter(
+  (ticket) => getSlaCategory(ticket) === "Met"
+);
 
   const priorityCounts = {
     Critical: tickets.filter((ticket) => ticket.priority === "Critical").length,
@@ -799,8 +959,8 @@ function Dashboard({ tickets }) {
 
   const monthlyTickets = months.map((month) => {
     return tickets.filter((ticket) => {
-      const createdDate = parseDate(ticket.created_at);
-      if (!createdDate) return false;
+      const createdDate = ticket.created_at ? new Date(ticket.created_at) : null;
+      if (!createdDate || isNaN(createdDate)) return false;
       return (
         createdDate.getFullYear() === month.year &&
         createdDate.getMonth() === month.month
@@ -817,8 +977,6 @@ function Dashboard({ tickets }) {
           <h2>Dashboard</h2>
           <p>Monitor your IT service performance</p>
         </div>
-
-    
       </div>
 
       <div className="stats-grid">
@@ -929,25 +1087,34 @@ function Dashboard({ tickets }) {
           </div>
         </div>
 
+        {/* Updated to use slaCounts object */}
         <div className="sla-summary-grid">
           <div className="sla-summary-card sla-summary-within">
             <span className="sla-summary-icon"><CheckCircle2 size={19} /></span>
-            <div><span>Within SLA</span><strong>{tickets.filter((t) => t.sla_status === "Within SLA").length}</strong></div>
+            <div><span>Within SLA</span><strong>{slaCounts.within}</strong></div>
           </div>
 
           <div className="sla-summary-card sla-summary-risk">
             <span className="sla-summary-icon"><Clock3 size={19} /></span>
-            <div><span>At Risk</span><strong>{tickets.filter((t) => t.sla_status === "At Risk").length}</strong></div>
+            <div><span>At Risk</span><strong>{slaCounts.risk}</strong></div>
           </div>
 
           <div className="sla-summary-card sla-summary-breached">
             <span className="sla-summary-icon"><AlertTriangle size={19} /></span>
-            <div><span>Breached</span><strong>{tickets.filter((t) => t.sla_status === "Breached").length}</strong></div>
+            <div><span>Breached</span><strong>{slaCounts.breached}</strong></div>
           </div>
-
+          <div className="sla-summary-card sla-summary-no-sla">
+            <span className="sla-summary-icon">
+              <Circle size={19} />
+            </span>
+            <div>
+              <span>No SLA</span>
+              <strong>{ticketsWithoutSLA.length}</strong>
+            </div>
+          </div>
           <div className="sla-summary-card sla-summary-unknown">
             <span className="sla-summary-icon"><Circle size={19} /></span>
-            <div><span>Unknown</span><strong>{tickets.filter((t) => !t.sla_status || t.sla_status === "Unknown").length}</strong></div>
+            <div><span>Unknown</span><strong>{slaCounts.unknown}</strong></div>
           </div>
         </div>
       </section>
@@ -2113,6 +2280,75 @@ function CreateTicket({ setTickets, currentUser }) {
    SLA MANAGEMENT
 ========================= */
 
+// =========================
+// SLA STATUS HELPER
+// =========================
+
+
+function parseDatabaseDate(value) {
+  if (!value) return null;
+
+  const timestamp = String(value).trim().replace(" ", "T");
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(timestamp);
+
+  const date = new Date(
+    hasTimezone ? timestamp : `${timestamp}Z`
+  );
+
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getSLAStatus(ticket) {
+  const status = String(ticket.status || "").trim().toLowerCase();
+  const deadline = ticket.sla_deadline;
+
+  if (["cancelled", "canceled"].includes(status)) {
+    return "Cancelled / Detached";
+  }
+
+  if (["on hold", "paused", "pending"].includes(status)) {
+    return "Paused / On Hold";
+  }
+
+  const dueAt = parseDatabaseDate(deadline);
+
+  if (["resolved", "closed", "completed"].includes(status)) {
+    if (!deadline) return "Met / Succeeded";
+
+    const resolvedAt = parseDatabaseDate(ticket.resolved_at);
+
+    if (resolvedAt && dueAt && resolvedAt <= dueAt) {
+      return "Met / Succeeded";
+    }
+
+    return "Breached / Violated";
+  }
+
+  if (!deadline) return "In Progress / Running";
+
+  const createdAt = parseDatabaseDate(ticket.created_at);
+  const now = new Date();
+
+  if (!dueAt || !createdAt) {
+    return "In Progress / Running";
+  }
+
+  const remaining = dueAt.getTime() - now.getTime();
+
+  if (remaining <= 0) {
+    return "Breached / Violated";
+  }
+
+  const totalDuration = dueAt.getTime() - createdAt.getTime();
+
+  if (totalDuration > 0 && remaining / totalDuration <= 0.2) {
+    return "Warning / At Risk";
+  }
+
+  return "In Progress / Running";
+}
+
+
 
 function SLAManagement({ tickets }) {
   const [, setCurrentTime] = useState(new Date());
@@ -2489,32 +2725,32 @@ function SLAManagement({ tickets }) {
 ========================= */
 
 function Analytics({ tickets }) {
-  const ticketData = tickets || [];
+    const ticketData = tickets || [];
 
   const totalTickets = ticketData.length;
 
   const openTickets = ticketData.filter(
-    (ticket) => ticket.status === "Open" || ticket.status === "In Progress"
+    (ticket) =>
+      ticket.status === "Open" ||
+      ticket.status === "In Progress"
   ).length;
 
   const resolvedTickets = ticketData.filter(
-    (ticket) => ticket.status === "Resolved" || ticket.status === "Closed"
+    (ticket) =>
+      ticket.status === "Resolved" ||
+      ticket.status === "Closed"
   ).length;
 
-  const breachedTickets = ticketData.filter(
-    (ticket) => ticket.sla_status === "Breached"
-  ).length;
 
-  const ticketsWithSLA = ticketData.filter((ticket) => ticket.sla_deadline);
+const {
+  ticketsWithSLA,
+  slaCounts,
+  completedSLATickets,
+  slaCompliance,
+} = calculateTicketMetrics(ticketData);
 
-  const compliantTickets = ticketsWithSLA.filter(
-    (ticket) => ticket.sla_status !== "Breached"
-  ).length;
+const breachedTickets = slaCounts.breached;
 
-  const slaCompliance =
-    ticketsWithSLA.length > 0
-      ? Math.round((compliantTickets / ticketsWithSLA.length) * 100)
-      : 0;
 
   const categories = ["Hardware", "Software", "Network", "Account", "Other"]
     .map((category) => ({
@@ -2523,23 +2759,30 @@ function Analytics({ tickets }) {
     }))
     .filter((item) => item.value > 0);
 
-  const priorityData = ["Critical", "High", "Medium", "Low"].map((priority) => {
-    const priorityTickets = ticketsWithSLA.filter(
+
+const priorityData = ["Critical", "High", "Medium", "Low"].map(
+  (priority) => {
+    const priorityTickets = completedSLATickets.filter(
       (ticket) => ticket.priority === priority
     );
 
-    const priorityCompliant = priorityTickets.filter(
-      (ticket) => ticket.sla_status !== "Breached"
+    const priorityMet = priorityTickets.filter(
+      (ticket) => getSlaCategory(ticket) === "Met"
     ).length;
 
     return {
       name: priority,
       value:
         priorityTickets.length > 0
-          ? Math.round((priorityCompliant / priorityTickets.length) * 100)
+          ? Math.round(
+              (priorityMet / priorityTickets.length) * 100
+            )
           : 0,
     };
-  });
+  }
+);
+
+
 
   return (
     <>
@@ -3195,7 +3438,13 @@ function UsersPage({ currentUser }) {
 
 function Reports({ tickets }) {
   const ticketData = tickets || [];
+  const getReportSlaStatus = (ticket) => {
+  if (!hasSlaDeadline(ticket)) {
+    return "No SLA";
+  }
 
+  return ticket.sla_status || getSlaCategory(ticket);
+};
   const exportCSV = () => {
     if (ticketData.length === 0) {
       alert("No ticket data available to export.");
@@ -3223,7 +3472,7 @@ function Reports({ tickets }) {
       ticket.status || "",
       ticket.requester_name || "",
       ticket.assigned_to_name || "Unassigned",
-      ticket.sla_status || "",
+      getReportSlaStatus(ticket),
       ticket.sla_target_hours || "",
       ticket.sla_deadline || "",
     ]);
@@ -3264,7 +3513,7 @@ function Reports({ tickets }) {
       ticket.ticket_number || "",
       ticket.priority || "",
       ticket.status || "",
-      ticket.sla_status || "",
+      getReportSlaStatus(ticket),
       ticket.sla_target_hours || "",
       ticket.sla_deadline || "",
     ]);
@@ -3391,26 +3640,18 @@ function Reports({ tickets }) {
     (ticket) => ticket.status === "Open" || ticket.status === "In Progress"
   ).length;
 
-  const resolvedTickets = ticketData.filter(
-    (ticket) => ticket.status === "Resolved" || ticket.status === "Closed"
-  ).length;
+ const resolvedTickets = ticketData.filter(
+  (ticket) => ticket.status === "Resolved" || ticket.status === "Closed"
+).length;
 
-  const breachedTickets = ticketData.filter(
-    (ticket) => ticket.sla_status === "Breached"
-  ).length;
+const {
+  ticketsWithSLA,
+  ticketsWithoutSLA,
+  slaCounts,
+  slaCompliance,
+} = calculateTicketMetrics(ticketData);
 
-  const ticketsWithSLA = ticketData.filter((ticket) => ticket.sla_deadline);
-
-  const slaCompliance =
-    ticketsWithSLA.length > 0
-      ? Math.round(
-          (ticketsWithSLA.filter((ticket) => ticket.sla_status !== "Breached")
-            .length /
-            ticketsWithSLA.length) *
-            100
-        )
-      : 0;
-
+const breachedTickets = slaCounts.breached;
   const priorities = ["Critical", "High", "Medium", "Low"].map((priority) => ({
     name: priority,
     count: ticketData.filter((ticket) => ticket.priority === priority).length,
@@ -3588,7 +3829,7 @@ function Reports({ tickets }) {
             <strong>
               {
                 ticketsWithSLA.filter(
-                  (ticket) => ticket.sla_status === "Within SLA"
+                  (ticket) => getSlaCategory(ticket) === "Within SLA"
                 ).length
               }
             </strong>
@@ -3598,7 +3839,7 @@ function Reports({ tickets }) {
             <strong>
               {
                 ticketsWithSLA.filter(
-                  (ticket) => ticket.sla_status === "At Risk"
+                  (ticket) => getSlaCategory(ticket) === "At Risk"
                 ).length
               }
             </strong>
@@ -3607,6 +3848,15 @@ function Reports({ tickets }) {
             <span>Breached</span>
             <strong>{breachedTickets}</strong>
           </div>
+        </div>
+        <div>
+          <span>Unknown</span>
+          <strong>{slaCounts.unknown}</strong>
+        </div>
+
+        <div>
+          <span>No SLA</span>
+          <strong>{ticketsWithoutSLA.length}</strong>
         </div>
       </section>
 
@@ -3666,9 +3916,292 @@ function Reports({ tickets }) {
   );
 }
 
+
 /* =========================
-   SETTINGS
+   KNOWLEDGE BASE
 ========================= */
+function KnowledgeBase() {
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState("All");
+  const [articles, setArticles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selected, setSelected] = useState(null);
+  const [showAddArticle, setShowAddArticle] = useState(false);
+  const [savingArticle, setSavingArticle] = useState(false);
+
+  const [newArticle, setNewArticle] = useState({
+    title: "",
+    category: "Hardware",
+    content: "",
+    keywords: ""
+  });
+  const storedUser = JSON.parse(localStorage.getItem("user") || "{}");
+
+const currentRole = String(
+  storedUser.role || localStorage.getItem("role") || ""
+)
+  .trim()
+  .toLowerCase()
+  .replace(/[\s-]+/g, "_");
+
+const canAddArticle = ["admin", "staff", "it_staff"].includes(currentRole);
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        setLoading(true); setError("");
+        const params = new URLSearchParams();
+        if (query.trim()) params.set("q", query.trim());
+        if (category !== "All") params.set("category", category);
+        const response = await fetch(`http://localhost:5001/api/knowledge-base?${params}`, {
+          headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || "Unable to load articles.");
+        if (!cancelled) setArticles(data);
+      } catch (e) {
+        if (!cancelled) setError(e.message || "Unable to load articles.");
+      } finally { if (!cancelled) setLoading(false); }
+    }, 200);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [query, category]);
+
+  const handleAddArticle = async (e) => {
+  e.preventDefault();
+
+  if (!newArticle.title.trim() || !newArticle.content.trim()) {
+    setError("Please enter an article title and instructions.");
+    return;
+  }
+
+  try {
+    setSavingArticle(true);
+    setError("");
+
+    const response = await fetch(
+      "http://localhost:5001/api/knowledge-base",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("token")}`
+        },
+        body: JSON.stringify(newArticle)
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.message || "Failed to save article.");
+    }
+
+    setArticles(prev => [
+      { ...data, type: "local", source: "Local Knowledge Base", url: null },
+      ...prev
+    ]);
+
+    setNewArticle({
+      title: "",
+      category: "Hardware",
+      content: "",
+      keywords: ""
+    });
+
+    setShowAddArticle(false);
+  } catch (err) {
+    setError(err.message);
+  } finally {
+    setSavingArticle(false);
+  }
+};
+
+  const categories = ["All", "Hardware", "Network", "Account", "Software", "General"];
+  return (
+    <div className="page">
+<div className="page-header">
+  <div className="header-content">
+    <div>
+      <h2>Knowledge Base</h2>
+      <p>Search troubleshooting guides before creating a ticket.</p>
+    </div>
+
+    {canAddArticle && (
+      <button
+        className="add-article-btn"
+        onClick={() => setShowAddArticle(true)}
+      >
+        <Plus size={18} />
+        Add Article
+      </button>
+    )}
+  </div>
+
+        
+      </div>
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 14, padding: 20, marginBottom: 18 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, border: "1px solid #dbe1ea", borderRadius: 10, padding: "10px 14px" }}>
+          <Search size={18}/>
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search articles, issues, or keywords..." style={{ border: 0, outline: 0, flex: 1, minWidth: 0 }} />
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+          {categories.map(c => <button key={c} onClick={() => setCategory(c)} style={{ padding: "6px 12px", borderRadius: 20, border: "1px solid #dbe1ea", background: category === c ? "#eef2ff" : "#fff", color: category === c ? "#4338ca" : "#475569", cursor: "pointer" }}>{c}</button>)}
+        </div>
+      </div>
+      {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
+      {loading ? <p>Loading articles…</p> : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))", gap: 14 }}>
+  
+    
+{articles.map(article => (
+  <button
+  className="article-card"
+  key={`${article.type || "local"}-${article.id}`}
+    onClick={() => setSelected(article)}
+    style={{
+      textAlign: "left",
+      background: "#fff",
+      border: "1px solid #e5e7eb",
+      borderRadius: 12,
+      padding: 18,
+      cursor: "pointer",
+      color: "inherit"
+    }}
+  >
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+      <span style={{ fontSize: 12, fontWeight: 600, color: "#6366f1" }}>
+        {article.category}
+      </span>
+
+      <span style={{
+        fontSize: 11,
+        fontWeight: 600,
+        color: article.type === "external" ? "#15803d" : "#64748b",
+        background: article.type === "external" ? "#dcfce7" : "#f1f5f9",
+        padding: "4px 8px",
+        borderRadius: 6
+      }}>
+        {article.type === "external" ? "EXTERNAL" : "LOCAL"}
+      </span>
+    </div>
+
+    <h3 style={{ margin: "12px 0 8px" }}>{article.title}</h3>
+
+    <p style={{ color: "#64748b", fontSize: 13 }}>
+      {article.content}
+    </p>
+
+    <span style={{ color: "#2563eb", fontWeight: 600, fontSize: 13 }}>
+      Read guide →
+    </span>
+  </button>
+))}
+
+          {!articles.length && <p>No articles found. Try another search.</p>}
+        </div>
+      )}
+      {selected && <div role="dialog" aria-modal="true" onClick={() => setSelected(null)} style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(15,23,42,.45)", display: "grid", placeItems: "center", padding: 20 }}>
+        <div onClick={e => e.stopPropagation()} style={{ background: "#fff", borderRadius: 14, padding: 24, width: "min(650px,100%)", maxHeight: "80vh", overflow: "auto" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><div><span style={{ color: "#6366f1" }}>{selected.category}</span><h2>{selected.title}</h2></div><button onClick={() => setSelected(null)} aria-label="Close"><X size={20}/></button></div>
+          <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.7 }}>{selected.content}</div>
+        </div>
+      </div>}
+
+{showAddArticle && (
+  <div className="article-modal-overlay"
+    onClick={() => setShowAddArticle(false)}>
+
+    <div className="article-modal"
+      onClick={e => e.stopPropagation()}>
+
+      <div className="article-modal-header">
+        <div>
+          <h2>Add Knowledge Article</h2>
+          <p>Create a new troubleshooting guide.</p>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setShowAddArticle(false)}
+        >
+          <X size={20} />
+        </button>
+      </div>
+
+      <form onSubmit={handleAddArticle}>
+        <label>Article Title</label>
+        <input
+          value={newArticle.title}
+          onChange={e => setNewArticle({
+            ...newArticle, title: e.target.value
+          })}
+          placeholder="Enter article title"
+          required
+        />
+
+        <label>Category</label>
+        <select
+          value={newArticle.category}
+          onChange={e => setNewArticle({
+            ...newArticle, category: e.target.value
+          })}
+        >
+          <option>Hardware</option>
+          <option>Network</option>
+          <option>Account</option>
+          <option>Software</option>
+          <option>Security</option>
+          <option>General</option>
+        </select>
+
+        <label>Troubleshooting Instructions</label>
+        <textarea
+          value={newArticle.content}
+          onChange={e => setNewArticle({
+            ...newArticle, content: e.target.value
+          })}
+          placeholder="Write the troubleshooting steps..."
+          rows={7}
+          required
+        />
+
+        <label>Search Keywords</label>
+        <input
+          value={newArticle.keywords}
+          onChange={e => setNewArticle({
+            ...newArticle, keywords: e.target.value
+          })}
+          placeholder="e.g. wifi, internet, connection"
+        />
+
+        <div className="article-modal-actions">
+          <button
+            type="button"
+            className="cancel-article-btn"
+            onClick={() => setShowAddArticle(false)}
+          >
+            Cancel
+          </button>
+
+          <button
+            type="submit"
+            className="save-article-btn"
+            disabled={savingArticle}
+          >
+            {savingArticle ? "Saving..." : "Save Article"}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+)}
+
+    </div>
+    
+  );
+}
 
 function SettingsPage() {
   return (
