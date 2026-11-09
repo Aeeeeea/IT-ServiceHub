@@ -96,7 +96,11 @@ function App() {
       try {
         setTicketsLoading(true);
 
-        const response = await fetch("http://localhost:5001/api/tickets");
+        const response = await fetch("http://localhost:5001/api/tickets", {
+  headers: {
+    Authorization: `Bearer ${localStorage.getItem("token")}`,
+  },
+});
         const data = await response.json();
 
         if (!response.ok) {
@@ -1232,6 +1236,8 @@ export function TicketDetails({ tickets, setTickets, currentUser }) {
 
   const [commentText, setCommentText] = useState("");
   const [comments, setComments] = useState([]);
+  const [attachments, setAttachments] = useState([]); 
+  console.log("Attachments:", attachments);
   const [commentsLoading, setCommentsLoading] = useState(true);
   const [commentError, setCommentError] = useState("");
   const [postingComment, setPostingComment] = useState(false);
@@ -1253,6 +1259,35 @@ export function TicketDetails({ tickets, setTickets, currentUser }) {
       String(t.id) === String(id) ||
       String(t.ticket_number) === String(id)
   );
+  useEffect(() => {
+  const loadAttachments = async () => {
+    try {
+      const token = localStorage.getItem("token");
+
+      const response = await fetch(
+        `http://localhost:5001/api/tickets/${encodeURIComponent(id)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to load attachments.");
+      }
+      console.log("Ticket API response:", data);
+      console.log("Ticket attachments:", data.attachments);
+      setAttachments(data.attachments || []);
+    } catch (error) {
+      console.error("Failed to load attachments:", error);
+    }
+  };
+
+  loadAttachments();
+}, [id]);
 
   const userRole = currentUser?.role?.toLowerCase() || "employee";
   const isAdmin = userRole === "admin";
@@ -1614,6 +1649,45 @@ export function TicketDetails({ tickets, setTickets, currentUser }) {
             {ticket.description || "No description provided."}
           </p>
         </div>
+                {/* Attachments Card */}
+        
+          <div className="ticket-content-card ticket-attachments-card bg-white border border-slate-200 rounded-xl p-6 mt-6">
+            <h3 className="ticket-section-title text-sm font-semibold text-slate-900 uppercase tracking-wider mb-4">
+              <span className="ticket-section-icon ticket-icon-blue">
+                <FileText size={18} />
+              </span>
+              Attachments ({attachments.length})
+            </h3>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {attachments.map((file) => {
+                const fileUrl = `http://localhost:5001${file.file_path}`;
+
+                return (
+                  <div key={file.id} className="border rounded-lg p-3">
+                    {file.mime_type.startsWith("image/") ? (
+                      <a href={fileUrl} target="_blank" rel="noreferrer">
+                        <img
+                          src={fileUrl}
+                          alt={file.original_name}
+                          className="w-full h-48 object-cover rounded-lg"
+                        />
+                      </a>
+                    ) : (
+                      <video controls className="w-full rounded-lg">
+                        <source src={fileUrl} type={file.mime_type} />
+                      </video>
+                    )}
+
+                    <p className="text-sm mt-2 break-words">
+                      {file.original_name}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        
         {/* Grid Layout: Left Content & Right Sidebar */}
        <div className="ticket-details-grid grid grid-cols-1 lg:grid-cols-3 gap-8 mt-8"> 
           
@@ -2055,6 +2129,10 @@ function CreateTicket({ setTickets, currentUser }) {
   const [users, setUsers] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [suggestedArticles, setSuggestedArticles] = useState([]);
+  const [loadingArticles, setLoadingArticles] = useState(false);
+  const [attachments, setAttachments] = useState([]);
+  const [attachmentError, setAttachmentError] = useState("");
 
   const [form, setForm] = useState({
     title: "",
@@ -2099,6 +2177,92 @@ function CreateTicket({ setTickets, currentUser }) {
       [e.target.name]: e.target.value,
     });
   };
+  const handleFileChange = (e) => {
+  const selectedFiles = Array.from(e.target.files);
+
+  if (attachments.length + selectedFiles.length > 5) {
+    setAttachmentError("You can upload a maximum of 5 files.");
+    e.target.value = "";
+    return;
+  }
+
+  const allowedTypes = [
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "video/mp4",
+    "video/webm",
+    "video/quicktime",
+  ];
+
+  const invalidFile = selectedFiles.find(
+    (file) => !allowedTypes.includes(file.type)
+  );
+
+  if (invalidFile) {
+    setAttachmentError("Only JPG, PNG, GIF, WEBP, MP4, WEBM, and MOV files are allowed.");
+    e.target.value = "";
+    return;
+  }
+
+  const oversizedFile = selectedFiles.find(
+    (file) => file.size > 50 * 1024 * 1024
+  );
+
+  if (oversizedFile) {
+    setAttachmentError("Each file must be smaller than 50 MB.");
+    e.target.value = "";
+    return;
+  }
+
+  setAttachments((current) => [...current, ...selectedFiles]);
+  setAttachmentError("");
+  e.target.value = "";
+};
+  useEffect(() => {
+  const searchArticles = async () => {
+    const searchText = `${form.title} ${form.description}`.trim();
+
+    if (searchText.length < 3) {
+      setSuggestedArticles([]);
+      return;
+    }
+
+    try {
+      setLoadingArticles(true);
+
+      const params = new URLSearchParams();
+      params.set("q", searchText);
+
+      const response = await fetch(
+        `http://localhost:5001/api/knowledge-base?${params}`,
+        {
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem("token")}`,
+          },
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to search articles.");
+      }
+
+      setSuggestedArticles(Array.isArray(data) ? data.slice(0, 3) : []);
+    } catch (error) {
+      console.error("Article search failed:", error);
+      setSuggestedArticles([]);
+    } finally {
+      setLoadingArticles(false);
+    }
+  };
+
+  const timer = setTimeout(searchArticles, 400);
+
+  return () => clearTimeout(timer);
+}, [form.title, form.description]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -2111,21 +2275,29 @@ function CreateTicket({ setTickets, currentUser }) {
     setSubmitting(true);
 
     try {
-      const response = await fetch("http://localhost:5001/api/tickets", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("token")}`,
-        },
-        body: JSON.stringify({
-          title: form.title.trim(),
-          description: form.description.trim(),
-          category: form.category,
-          priority: form.priority,
-          requester_id: currentUser?.id || null,
-          assigned_to: form.assignedTo ? Number(form.assignedTo) : null,
-        }),
-      });
+const ticketData = new FormData();
+
+ticketData.append("title", form.title.trim());
+ticketData.append("description", form.description.trim());
+ticketData.append("category", form.category);
+ticketData.append("priority", form.priority);
+ticketData.append("requester_id", currentUser?.id || "");
+ticketData.append(
+  "assigned_to",
+  form.assignedTo ? Number(form.assignedTo) : ""
+);
+
+attachments.forEach((file) => {
+  ticketData.append("attachments", file);
+});
+
+const response = await fetch("http://localhost:5001/api/tickets", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${localStorage.getItem("token")}`,
+  },
+  body: ticketData,
+});
 
       const data = await response.json();
 
@@ -2245,6 +2417,88 @@ function CreateTicket({ setTickets, currentUser }) {
                 disabled={submitting}
               />
             </div>
+            <div className="form-group full">
+  <label>Attachments (Optional)</label>
+
+  <input
+    type="file"
+    multiple
+    accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime"
+    onChange={handleFileChange}
+    disabled={submitting || attachments.length >= 5}
+  />
+
+  <small>
+    Upload up to 5 screenshots, photos, or videos. Maximum 50 MB per file.
+  </small>
+
+  {attachmentError && (
+    <p className="error-text">{attachmentError}</p>
+  )}
+
+  {attachments.length > 0 && (
+    <div className="attachment-list">
+      {attachments.map((file, index) => (
+        <div className="attachment-item" key={`${file.name}-${index}`}>
+          <span>{file.name}</span>
+
+          <button
+            type="button"
+            onClick={() =>
+              setAttachments((current) =>
+                current.filter((_, i) => i !== index)
+              )
+            }
+            disabled={submitting}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+    </div>
+  )}
+</div>
+            {(loadingArticles || suggestedArticles.length > 0) && (
+  <div className="form-group full">
+    <div className="suggested-articles">
+      <h3>
+        <BookOpen size={18} />
+        Suggested Knowledge Base Articles
+      </h3>
+
+      {loadingArticles && (
+        <p>Searching for helpful articles...</p>
+      )}
+
+      {!loadingArticles &&
+        suggestedArticles.map((article) => (
+          <div
+            className="suggested-article-card"
+            key={`${article.type || "local"}-${article.id}`}
+          >
+            <div>
+              <strong>{article.title}</strong>
+              <span>{article.category}</span>
+              <p>
+                {article.content?.slice(0, 120)}
+                {article.content?.length > 120 ? "..." : ""}
+              </p>
+            </div>
+
+            {(article.url || article.external_url) && (
+              <a
+                href={article.url || article.external_url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                View Guide ↗
+              </a>
+            )}
+          </div>
+        ))}
+    </div>
+  </div>
+)}
           </div>
 
          
@@ -3920,6 +4174,7 @@ const breachedTickets = slaCounts.breached;
 /* =========================
    KNOWLEDGE BASE
 ========================= */
+
 function KnowledgeBase() {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("All");
@@ -3934,272 +4189,547 @@ function KnowledgeBase() {
     title: "",
     category: "Hardware",
     content: "",
-    keywords: ""
+    keywords: "",
+    external_url: ""
   });
+
   const storedUser = JSON.parse(localStorage.getItem("user") || "{}");
 
-const currentRole = String(
-  storedUser.role || localStorage.getItem("role") || ""
-)
-  .trim()
-  .toLowerCase()
-  .replace(/[\s-]+/g, "_");
+  const currentRole = String(
+    storedUser.role || localStorage.getItem("role") || ""
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
 
-const canAddArticle = ["admin", "staff", "it_staff"].includes(currentRole);
+  const canAddArticle = ["admin", "staff", "it_staff"].includes(currentRole);
 
+  // Load Knowledge Base articles
   useEffect(() => {
     let cancelled = false;
+
     const timer = setTimeout(async () => {
       try {
-        setLoading(true); setError("");
+        setLoading(true);
+        setError("");
+
         const params = new URLSearchParams();
+
         if (query.trim()) params.set("q", query.trim());
         if (category !== "All") params.set("category", category);
-        const response = await fetch(`http://localhost:5001/api/knowledge-base?${params}`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem("token")}` },
-        });
+
+        const response = await fetch(
+          `http://localhost:5001/api/knowledge-base?${params}`,
+          {
+            headers: {
+              Authorization: `Bearer ${localStorage.getItem("token")}`
+            }
+          }
+        );
+
         const data = await response.json();
-        if (!response.ok) throw new Error(data.message || "Unable to load articles.");
-        if (!cancelled) setArticles(data);
+
+        if (!response.ok) {
+          throw new Error(data.message || "Unable to load articles.");
+        }
+
+        if (!cancelled) {
+          setArticles(data);
+        }
       } catch (e) {
-        if (!cancelled) setError(e.message || "Unable to load articles.");
-      } finally { if (!cancelled) setLoading(false); }
+        if (!cancelled) {
+          setError(e.message || "Unable to load articles.");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
     }, 200);
-    return () => { cancelled = true; clearTimeout(timer); };
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [query, category]);
 
+  // Add a new article
   const handleAddArticle = async (e) => {
-  e.preventDefault();
+    e.preventDefault();
 
-  if (!newArticle.title.trim() || !newArticle.content.trim()) {
-    setError("Please enter an article title and instructions.");
-    return;
-  }
-
-  try {
-    setSavingArticle(true);
-    setError("");
-
-    const response = await fetch(
-      "http://localhost:5001/api/knowledge-base",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("token")}`
-        },
-        body: JSON.stringify(newArticle)
-      }
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.message || "Failed to save article.");
+    if (!newArticle.title.trim() || !newArticle.content.trim()) {
+      setError("Please enter an article title and instructions.");
+      return;
     }
 
-    setArticles(prev => [
-      { ...data, type: "local", source: "Local Knowledge Base", url: null },
-      ...prev
-    ]);
+    try {
+      setSavingArticle(true);
+      setError("");
 
-    setNewArticle({
-      title: "",
-      category: "Hardware",
-      content: "",
-      keywords: ""
-    });
+      const response = await fetch(
+        "http://localhost:5001/api/knowledge-base",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("token")}`
+          },
+          body: JSON.stringify(newArticle)
+        }
+      );
 
-    setShowAddArticle(false);
-  } catch (err) {
-    setError(err.message);
-  } finally {
-    setSavingArticle(false);
-  }
-};
+      const data = await response.json();
 
-  const categories = ["All", "Hardware", "Network", "Account", "Software", "General"];
+      if (!response.ok) {
+        throw new Error(data.message || "Failed to save article.");
+      }
+
+      setArticles(prev => [
+        {
+          ...data,
+          type: "local",
+          source: data.external_url
+            ? "External Support"
+            : "Local Knowledge Base",
+          url: data.url || data.external_url || null
+        },
+        ...prev
+      ]);
+
+      setNewArticle({
+        title: "",
+        category: "Hardware",
+        content: "",
+        keywords: "",
+        external_url: ""
+      });
+
+      setShowAddArticle(false);
+
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSavingArticle(false);
+    }
+  };
+
+  // Official guide fallback
+  const getOfficialGuide = (title = "") => {
+    const t = title.toLowerCase();
+
+    if (t.includes("screen") || t.includes("black"))
+      return "https://support.microsoft.com/search/results?query=black%20screen";
+
+    if (t.includes("wifi") || t.includes("wi-fi") || t.includes("network"))
+      return "https://support.microsoft.com/search/results?query=network%20connection%20problems";
+
+    if (t.includes("password") || t.includes("account"))
+      return "https://support.microsoft.com/search/results?query=password%20reset";
+
+    if (t.includes("printer"))
+      return "https://support.microsoft.com/search/results?query=printer%20problems";
+
+    return null;
+  };
+
+  const categories = [
+    "All",
+    "Hardware",
+    "Network",
+    "Account",
+    "Software",
+    "General"
+  ];
+
   return (
     <div className="page">
-<div className="page-header">
-  <div className="header-content">
-    <div>
-      <h2>Knowledge Base</h2>
-      <p>Search troubleshooting guides before creating a ticket.</p>
-    </div>
 
-    {canAddArticle && (
-      <button
-        className="add-article-btn"
-        onClick={() => setShowAddArticle(true)}
+      {/* Page Header */}
+      <div className="page-header">
+        <div className="header-content">
+          <div>
+            <h2>Knowledge Base</h2>
+            <p>Search troubleshooting guides before creating a ticket.</p>
+          </div>
+
+          {canAddArticle && (
+            <button
+              className="add-article-btn"
+              onClick={() => setShowAddArticle(true)}
+            >
+              <Plus size={18} />
+              Add Article
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Search and Categories */}
+      <div
+        style={{
+          background: "#fff",
+          border: "1px solid #e5e7eb",
+          borderRadius: 14,
+          padding: 20,
+          marginBottom: 18
+        }}
       >
-        <Plus size={18} />
-        Add Article
-      </button>
-    )}
-  </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            border: "1px solid #dbe1ea",
+            borderRadius: 10,
+            padding: "10px 14px"
+          }}
+        >
+          <Search size={18} />
 
-        
-      </div>
-      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 14, padding: 20, marginBottom: 18 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, border: "1px solid #dbe1ea", borderRadius: 10, padding: "10px 14px" }}>
-          <Search size={18}/>
-          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search articles, issues, or keywords..." style={{ border: 0, outline: 0, flex: 1, minWidth: 0 }} />
+          <input
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search articles, issues, or keywords..."
+            style={{
+              border: 0,
+              outline: 0,
+              flex: 1,
+              minWidth: 0
+            }}
+          />
         </div>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
-          {categories.map(c => <button key={c} onClick={() => setCategory(c)} style={{ padding: "6px 12px", borderRadius: 20, border: "1px solid #dbe1ea", background: category === c ? "#eef2ff" : "#fff", color: category === c ? "#4338ca" : "#475569", cursor: "pointer" }}>{c}</button>)}
+
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            flexWrap: "wrap",
+            marginTop: 12
+          }}
+        >
+          {categories.map(c => (
+            <button
+              key={c}
+              onClick={() => setCategory(c)}
+              style={{
+                padding: "6px 12px",
+                borderRadius: 20,
+                border: "1px solid #dbe1ea",
+                background: category === c ? "#eef2ff" : "#fff",
+                color: category === c ? "#4338ca" : "#475569",
+                cursor: "pointer"
+              }}
+            >
+              {c}
+            </button>
+          ))}
         </div>
       </div>
-      {error && <p style={{ color: "#b91c1c" }}>{error}</p>}
-      {loading ? <p>Loading articles…</p> : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))", gap: 14 }}>
-  
-    
-{articles.map(article => (
-  <button
-  className="article-card"
-  key={`${article.type || "local"}-${article.id}`}
-    onClick={() => setSelected(article)}
-    style={{
-      textAlign: "left",
-      background: "#fff",
-      border: "1px solid #e5e7eb",
-      borderRadius: 12,
-      padding: 18,
-      cursor: "pointer",
-      color: "inherit"
-    }}
-  >
-    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-      <span style={{ fontSize: 12, fontWeight: 600, color: "#6366f1" }}>
-        {article.category}
-      </span>
 
-      <span style={{
-        fontSize: 11,
-        fontWeight: 600,
-        color: article.type === "external" ? "#15803d" : "#64748b",
-        background: article.type === "external" ? "#dcfce7" : "#f1f5f9",
-        padding: "4px 8px",
-        borderRadius: 6
-      }}>
-        {article.type === "external" ? "EXTERNAL" : "LOCAL"}
-      </span>
-    </div>
+      {error && (
+        <p style={{ color: "#b91c1c" }}>{error}</p>
+      )}
 
-    <h3 style={{ margin: "12px 0 8px" }}>{article.title}</h3>
+      {/* Article Cards */}
+      {loading ? (
+        <p>Loading articles…</p>
+      ) : (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))",
+            gap: 14
+          }}
+        >
+          {articles.map(article => {
+            const hasExternalLink = Boolean(
+              article.url || article.external_url
+            );
 
-    <p style={{ color: "#64748b", fontSize: 13 }}>
-      {article.content}
-    </p>
+            return (
+              <button
+                className="article-card"
+                key={`${article.type || "local"}-${article.id}`}
+                onClick={() => setSelected(article)}
+                style={{
+                  textAlign: "left",
+                  background: "#fff",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 12,
+                  padding: 18,
+                  cursor: "pointer",
+                  color: "inherit"
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 8
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: "#6366f1"
+                    }}
+                  >
+                    {article.category}
+                  </span>
 
-    <span style={{ color: "#2563eb", fontWeight: 600, fontSize: 13 }}>
-      Read guide →
-    </span>
-  </button>
-))}
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color:
+                        article.type === "external" || hasExternalLink
+                          ? "#15803d"
+                          : "#64748b",
+                      background:
+                        article.type === "external" || hasExternalLink
+                          ? "#dcfce7"
+                          : "#f1f5f9",
+                      padding: "4px 8px",
+                      borderRadius: 6
+                    }}
+                  >
+                    {article.type === "external" || hasExternalLink
+                      ? "EXTERNAL"
+                      : "LOCAL"}
+                  </span>
+                </div>
 
-          {!articles.length && <p>No articles found. Try another search.</p>}
+                <h3 style={{ margin: "12px 0 8px" }}>
+                  {article.title}
+                </h3>
+
+                <p style={{ color: "#64748b", fontSize: 13 }}>
+                  {article.content}
+                </p>
+
+                <span
+                  style={{
+                    color: "#2563eb",
+                    fontWeight: 600,
+                    fontSize: 13
+                  }}
+                >
+                  Read guide →
+                </span>
+              </button>
+            );
+          })}
+
+          {!articles.length && (
+            <p>No articles found. Try another search.</p>
+          )}
         </div>
       )}
-      {selected && <div role="dialog" aria-modal="true" onClick={() => setSelected(null)} style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(15,23,42,.45)", display: "grid", placeItems: "center", padding: 20 }}>
-        <div onClick={e => e.stopPropagation()} style={{ background: "#fff", borderRadius: 14, padding: 24, width: "min(650px,100%)", maxHeight: "80vh", overflow: "auto" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><div><span style={{ color: "#6366f1" }}>{selected.category}</span><h2>{selected.title}</h2></div><button onClick={() => setSelected(null)} aria-label="Close"><X size={20}/></button></div>
-          <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.7 }}>{selected.content}</div>
+
+      {/* Article Details Modal */}
+      {selected && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setSelected(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 999,
+            background: "rgba(15,23,42,.45)",
+            display: "grid",
+            placeItems: "center",
+            padding: 20
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: "#fff",
+              borderRadius: 14,
+              padding: 24,
+              width: "min(650px,100%)",
+              maxHeight: "80vh",
+              overflow: "auto"
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                gap: 12
+              }}
+            >
+              <div>
+                <span style={{ color: "#6366f1" }}>
+                  {selected.category}
+                </span>
+
+                <h2>{selected.title}</h2>
+              </div>
+
+              <button
+                onClick={() => setSelected(null)}
+                aria-label="Close"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div
+              style={{
+                whiteSpace: "pre-wrap",
+                lineHeight: 1.7
+              }}
+            >
+              {selected.content}
+            </div>
+
+            {/* External Support Link */}
+            {(selected.url ||
+              selected.external_url ||
+              getOfficialGuide(selected.title)) && (
+              <a
+                href={
+                  selected.url ||
+                  selected.external_url ||
+                  getOfficialGuide(selected.title)
+                }
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: "inline-block",
+                  marginTop: 20,
+                  padding: "10px 16px",
+                  background: "#5b55ed",
+                  color: "#fff",
+                  borderRadius: 8,
+                  textDecoration: "none",
+                  fontWeight: 600
+                }}
+              >
+                Read Official Guide ↗
+              </a>
+            )}
+          </div>
         </div>
-      </div>}
+      )}
 
-{showAddArticle && (
-  <div className="article-modal-overlay"
-    onClick={() => setShowAddArticle(false)}>
-
-    <div className="article-modal"
-      onClick={e => e.stopPropagation()}>
-
-      <div className="article-modal-header">
-        <div>
-          <h2>Add Knowledge Article</h2>
-          <p>Create a new troubleshooting guide.</p>
-        </div>
-
-        <button
-          type="button"
+      {/* Add Article Modal */}
+      {showAddArticle && (
+        <div
+          className="article-modal-overlay"
           onClick={() => setShowAddArticle(false)}
         >
-          <X size={20} />
-        </button>
-      </div>
-
-      <form onSubmit={handleAddArticle}>
-        <label>Article Title</label>
-        <input
-          value={newArticle.title}
-          onChange={e => setNewArticle({
-            ...newArticle, title: e.target.value
-          })}
-          placeholder="Enter article title"
-          required
-        />
-
-        <label>Category</label>
-        <select
-          value={newArticle.category}
-          onChange={e => setNewArticle({
-            ...newArticle, category: e.target.value
-          })}
-        >
-          <option>Hardware</option>
-          <option>Network</option>
-          <option>Account</option>
-          <option>Software</option>
-          <option>Security</option>
-          <option>General</option>
-        </select>
-
-        <label>Troubleshooting Instructions</label>
-        <textarea
-          value={newArticle.content}
-          onChange={e => setNewArticle({
-            ...newArticle, content: e.target.value
-          })}
-          placeholder="Write the troubleshooting steps..."
-          rows={7}
-          required
-        />
-
-        <label>Search Keywords</label>
-        <input
-          value={newArticle.keywords}
-          onChange={e => setNewArticle({
-            ...newArticle, keywords: e.target.value
-          })}
-          placeholder="e.g. wifi, internet, connection"
-        />
-
-        <div className="article-modal-actions">
-          <button
-            type="button"
-            className="cancel-article-btn"
-            onClick={() => setShowAddArticle(false)}
+          <div
+            className="article-modal"
+            onClick={e => e.stopPropagation()}
           >
-            Cancel
-          </button>
+            <div className="article-modal-header">
+              <div>
+                <h2>Add Knowledge Article</h2>
+                <p>Create a new troubleshooting guide.</p>
+              </div>
 
-          <button
-            type="submit"
-            className="save-article-btn"
-            disabled={savingArticle}
-          >
-            {savingArticle ? "Saving..." : "Save Article"}
-          </button>
+              <button
+                type="button"
+                onClick={() => setShowAddArticle(false)}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddArticle}>
+              <label>Article Title</label>
+
+              <input
+                value={newArticle.title}
+                onChange={e => setNewArticle({
+                  ...newArticle,
+                  title: e.target.value
+                })}
+                placeholder="Enter article title"
+                required
+              />
+
+              <label>Category</label>
+
+              <select
+                value={newArticle.category}
+                onChange={e => setNewArticle({
+                  ...newArticle,
+                  category: e.target.value
+                })}
+              >
+                <option>Hardware</option>
+                <option>Network</option>
+                <option>Account</option>
+                <option>Software</option>
+                <option>Security</option>
+                <option>General</option>
+              </select>
+
+              <label>Troubleshooting Instructions</label>
+
+              <textarea
+                value={newArticle.content}
+                onChange={e => setNewArticle({
+                  ...newArticle,
+                  content: e.target.value
+                })}
+                placeholder="Write the troubleshooting steps..."
+                rows={7}
+                required
+              />
+
+              <label>Search Keywords</label>
+
+              <input
+                value={newArticle.keywords}
+                onChange={e => setNewArticle({
+                  ...newArticle,
+                  keywords: e.target.value
+                })}
+                placeholder="e.g. wifi, internet, connection"
+              />
+
+              {/* External URL Field */}
+              <label>External Support URL (optional)</label>
+
+              <input
+                type="url"
+                value={newArticle.external_url}
+                onChange={e => setNewArticle({
+                  ...newArticle,
+                  external_url: e.target.value
+                })}
+                placeholder="https://support.microsoft.com/..."
+              />
+
+              <div className="article-modal-actions">
+                <button
+                  type="button"
+                  className="cancel-article-btn"
+                  onClick={() => setShowAddArticle(false)}
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="submit"
+                  className="save-article-btn"
+                  disabled={savingArticle}
+                >
+                  {savingArticle ? "Saving..." : "Save Article"}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
-      </form>
-    </div>
-  </div>
-)}
+      )}
 
     </div>
-    
   );
 }
 

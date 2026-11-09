@@ -1,7 +1,14 @@
+
 const express = require("express");
 const db = require("../database");
 const { authenticateToken } = require("../middleware/auth");
+
 const router = express.Router();
+
+// ==========================================
+// EXTERNAL SUPPORT ARTICLES
+// ==========================================
+
 const externalArticles = [
   {
     id: "external-1",
@@ -49,144 +56,243 @@ const externalArticles = [
     url: "https://support.microsoft.com/search/results?query=account%20security"
   },
   {
-  id: "external-6",
-  title: "Fix problems with apps from Microsoft Store",
-  category: "Software",
-  content: "Find solutions for Microsoft Store app installation, updates, and application errors.",
-  keywords: "software app microsoft store installation update",
-  source: "Microsoft Support",
-  url: "https://support.microsoft.com/search/results?query=Microsoft%20Store%20app%20problems"
-},
-{
-  id: "external-7",
-  title: "Update Windows",
-  category: "Software",
-  content: "Learn how to check for and install Windows updates and troubleshoot update problems.",
-  keywords: "windows update upgrade installation software",
-  source: "Microsoft Support",
-  url: "https://support.microsoft.com/search/results?query=Windows%20Update"
-},
-{
-  id: "external-8",
-  title: "Troubleshoot Microsoft Office applications",
-  category: "Software",
-  content: "Find help for Microsoft Word, Excel, PowerPoint, and other Office application issues.",
-  keywords: "office word excel powerpoint application error",
-  source: "Microsoft Support",
-  url: "https://support.microsoft.com/search/results?query=Office%20application%20troubleshooting"
-},
-{
-  id: "external-9",
-  title: "Windows help and learning",
-  category: "General",
-  content: "Explore Windows tutorials, setup instructions, and general troubleshooting guides.",
-  keywords: "windows help computer guide tutorial",
-  source: "Microsoft Support",
-  url: "https://support.microsoft.com/windows"
-},
-{
-  id: "external-10",
-  title: "Google Workspace troubleshooting",
-  category: "General",
-  content: "Find help for Gmail, Google Drive, Google Docs, and other Google Workspace services.",
-  keywords: "google workspace gmail drive docs help",
-  source: "Google Support",
-  url: "https://support.google.com/"
-},
-{
-  id: "external-11",
-  title: "HP Computer Support",
-  category: "General",
-  content: "Find computer setup, maintenance, diagnostics, and troubleshooting resources.",
-  keywords: "computer laptop hp support diagnostics maintenance",
-  source: "HP Support",
-  url: "https://support.hp.com/"
-},
+    id: "external-6",
+    title: "Fix problems with apps from Microsoft Store",
+    category: "Software",
+    content: "Find solutions for Microsoft Store app installation, updates, and application errors.",
+    keywords: "software app microsoft store installation update",
+    source: "Microsoft Support",
+    url: "https://support.microsoft.com/search/results?query=Microsoft%20Store%20app%20problems"
+  },
+  {
+    id: "external-7",
+    title: "Update Windows",
+    category: "Software",
+    content: "Learn how to check for and install Windows updates and troubleshoot update problems.",
+    keywords: "windows update upgrade installation software",
+    source: "Microsoft Support",
+    url: "https://support.microsoft.com/search/results?query=Windows%20Update"
+  },
+  {
+    id: "external-8",
+    title: "Troubleshoot Microsoft Office applications",
+    category: "Software",
+    content: "Find help for Microsoft Word, Excel, PowerPoint, and other Office application issues.",
+    keywords: "office word excel powerpoint application error",
+    source: "Microsoft Support",
+    url: "https://support.microsoft.com/search/results?query=Office%20application%20troubleshooting"
+  },
+  {
+    id: "external-9",
+    title: "Windows help and learning",
+    category: "General",
+    content: "Explore Windows tutorials, setup instructions, and general troubleshooting guides.",
+    keywords: "windows help computer guide tutorial",
+    source: "Microsoft Support",
+    url: "https://support.microsoft.com/windows"
+  },
+  {
+    id: "external-10",
+    title: "Google Workspace troubleshooting",
+    category: "General",
+    content: "Find help for Gmail, Google Drive, Google Docs, and other Google Workspace services.",
+    keywords: "google workspace gmail drive docs help",
+    source: "Google Support",
+    url: "https://support.google.com/"
+  },
+  {
+    id: "external-11",
+    title: "HP Computer Support",
+    category: "General",
+    content: "Find computer setup, maintenance, diagnostics, and troubleshooting resources.",
+    keywords: "computer laptop hp support diagnostics maintenance",
+    source: "HP Support",
+    url: "https://support.hp.com/"
+  }
 ];
 
+// ==========================================
+// GET KNOWLEDGE BASE ARTICLES
+// ==========================================
 
 router.get("/", authenticateToken, (req, res) => {
   try {
     const q = String(req.query.q || "").trim().toLowerCase();
     const category = String(req.query.category || "").trim().toLowerCase();
 
-    // Search local SQLite articles
+    const searchTerm = `%${q}%`;
+    const categoryTerm = `%${category}%`;
+
+    // Get local SQLite articles
     const localArticles = db.prepare(`
-      SELECT id, title, category, content, keywords,
-             created_at, updated_at
+      SELECT
+        id,
+        title,
+        category,
+        content,
+        keywords,
+        external_url,
+        created_by,
+        created_at,
+        updated_at
       FROM knowledge_articles
-      WHERE (? = '' OR
-        LOWER(title) LIKE ? OR
-        LOWER(category) LIKE ? OR
-        LOWER(content) LIKE ? OR
-        LOWER(keywords) LIKE ?)
-      AND (? = '' OR LOWER(category) LIKE ?)
+      WHERE
+        (? = '' OR
+          LOWER(title) LIKE ? OR
+          LOWER(category) LIKE ? OR
+          LOWER(content) LIKE ? OR
+          LOWER(keywords) LIKE ?)
+        AND
+        (? = '' OR LOWER(category) LIKE ?)
       ORDER BY updated_at DESC
       LIMIT 100
     `).all(
-      q, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`,
-      category, `%${category}%`
+      q,
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      searchTerm,
+      category,
+      categoryTerm
     ).map(article => ({
       ...article,
-      source: "Local Knowledge Base",
+      source: article.external_url
+        ? "External Support"
+        : "Local Knowledge Base",
       type: "local",
-      url: null
+      url: article.external_url || null
     }));
 
-    // Search external support resources
-    const filteredExternal = externalArticles.filter(article => {
-      const text = [
-        article.title,
-        article.category,
-        article.content,
-        article.keywords
-      ].join(" ").toLowerCase();
+    // Search external support articles
+    const filteredExternal = externalArticles
+      .filter(article => {
+        const searchableText = [
+          article.title,
+          article.category,
+          article.content,
+          article.keywords,
+          article.source
+        ].join(" ").toLowerCase();
 
-      return (!q || text.includes(q)) &&
-        (!category || article.category.toLowerCase().includes(category));
-    }).map(article => ({
-      ...article,
-      type: "external"
-    }));
+        const matchesSearch =
+          !q || searchableText.includes(q);
 
-    // Return both types of articles
-    res.json([...localArticles, ...filteredExternal]);
+        const matchesCategory =
+          !category ||
+          article.category.toLowerCase().includes(category);
+
+        return matchesSearch && matchesCategory;
+      })
+      .map(article => ({
+        ...article,
+        type: "external"
+      }));
+
+    res.json([
+      ...localArticles,
+      ...filteredExternal
+    ]);
 
   } catch (error) {
     console.error("Knowledge Base search failed:", error);
+
     res.status(500).json({
       message: "Failed to search Knowledge Base."
     });
   }
 });
 
+// ==========================================
+// CREATE KNOWLEDGE BASE ARTICLE
+// ==========================================
 
 router.post("/", authenticateToken, (req, res) => {
   try {
     const role = String(req.user.role || "")
-  .trim()
-  .toLowerCase()
-  .replace(/[\s-]+/g, "_");
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
 
-if (!["admin", "staff", "it_staff"].includes(role)) {
-  return res.status(403).json({
-    message: "Only administrators and IT staff can create articles."
-  });
-}
+    if (!["admin", "staff", "it_staff"].includes(role)) {
+      return res.status(403).json({
+        message: "Only administrators and IT staff can create articles."
+      });
+    }
+
     const title = String(req.body.title || "").trim();
-    const category = String(req.body.category || "General").trim() || "General";
+
+    const category =
+      String(req.body.category || "General").trim() || "General";
+
     const content = String(req.body.content || "").trim();
+
     const keywords = String(req.body.keywords || "").trim();
-    if (!title || !content) return res.status(400).json({ message: "Title and content are required." });
+
+    const external_url =
+      String(req.body.external_url || "").trim();
+
+    if (!title || !content) {
+      return res.status(400).json({
+        message: "Title and content are required."
+      });
+    }
+
+    // Validate optional support URL
+    if (external_url) {
+      try {
+        const parsedUrl = new URL(external_url);
+
+        if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+          throw new Error("Invalid URL protocol");
+        }
+      } catch {
+        return res.status(400).json({
+          message: "Please enter a valid HTTP or HTTPS URL."
+        });
+      }
+    }
+
     const result = db.prepare(`
-      INSERT INTO knowledge_articles (title, category, content, keywords, created_by)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(title, category, content, keywords, Number(req.user.id));
-    res.status(201).json(db.prepare("SELECT * FROM knowledge_articles WHERE id = ?").get(result.lastInsertRowid));
+      INSERT INTO knowledge_articles (
+        title,
+        category,
+        content,
+        keywords,
+        external_url,
+        created_by
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      title,
+      category,
+      content,
+      keywords,
+      external_url || null,
+      Number(req.user.id)
+    );
+
+    const createdArticle = db.prepare(`
+      SELECT *
+      FROM knowledge_articles
+      WHERE id = ?
+    `).get(result.lastInsertRowid);
+
+    res.status(201).json({
+      ...createdArticle,
+      source: createdArticle.external_url
+        ? "External Support"
+        : "Local Knowledge Base",
+      type: "local",
+      url: createdArticle.external_url || null
+    });
+
   } catch (error) {
     console.error("Failed to create Knowledge Base article:", error);
-    res.status(500).json({ message: "Failed to create article." });
-    
+
+    res.status(500).json({
+      message: "Failed to create article."
+    });
   }
 });
+
 module.exports = router;
