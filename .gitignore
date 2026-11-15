@@ -8,3 +8,9 @@ node_modules
 # Local files
 .DS_Store
 backend/uploads/
+
+# Keep local environment files private
+backend/.env
+
+# Ignore the separate older project copy
+IT-ServiceHub/
