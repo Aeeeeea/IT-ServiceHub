@@ -5,9 +5,13 @@ const { authenticateToken } = require("../middleware/auth");
 const router = express.Router();
 
 // Get notifications belonging only to the logged-in user
+
+
+
 router.get("/", authenticateToken, (req, res) => {
   try {
     const userId = Number(req.user.id);
+    const role = String(req.user.role || "").toLowerCase();
 
     const notifications = db.prepare(`
       SELECT
@@ -23,26 +27,52 @@ router.get("/", authenticateToken, (req, res) => {
         t.title AS ticket_title
       FROM notifications n
       LEFT JOIN tickets t ON t.id = n.ticket_id
-      WHERE n.user_id = ?
+      WHERE
+        n.user_id = ?
+        AND (
+          ? = 'admin'
+          OR (
+            ? = 'it_staff'
+            AND t.assigned_to = ?
+          )
+          OR (
+            ? = 'employee'
+            AND t.requester_id = ?
+          )
+        )
       ORDER BY n.created_at DESC, n.id DESC
       LIMIT 50
-    `).all(userId);
+    `).all(userId, role, role, userId, role, userId);
 
     res.json(notifications);
   } catch (error) {
     console.error("Failed to load notifications:", error);
-    res.status(500).json({ message: "Failed to load notifications." });
+    res.status(500).json({
+      message: "Failed to load notifications."
+    });
   }
 });
+
+
+
 
 // Get unread notification count
 router.get("/unread-count", authenticateToken, (req, res) => {
   try {
+    const userId = Number(req.user.id);
+    const role = String(req.user.role || "").toLowerCase();
+
     const result = db.prepare(`
       SELECT COUNT(*) AS count
-      FROM notifications
-      WHERE user_id = ? AND is_read = 0
-    `).get(Number(req.user.id));
+      FROM notifications n
+      LEFT JOIN tickets t ON t.id = n.ticket_id
+      WHERE n.user_id = ?
+        AND n.is_read = 0
+        AND (
+          ? != 'employee'
+          OR t.requester_id = ?
+        )
+    `).get(userId, role, userId);
 
     res.json({ count: result.count });
   } catch (error) {
@@ -54,11 +84,23 @@ router.get("/unread-count", authenticateToken, (req, res) => {
 // Mark one of the current user's notifications as read
 router.patch("/:id/read", authenticateToken, (req, res) => {
   try {
+    const userId = Number(req.user.id);
+    const role = String(req.user.role || "").toLowerCase();
+
     const result = db.prepare(`
       UPDATE notifications
       SET is_read = 1
-      WHERE id = ? AND user_id = ?
-    `).run(Number(req.params.id), Number(req.user.id));
+      WHERE id = ?
+        AND user_id = ?
+        AND (
+          ? != 'employee'
+          OR EXISTS (
+            SELECT 1 FROM tickets t
+            WHERE t.id = notifications.ticket_id
+              AND t.requester_id = ?
+          )
+        )
+    `).run(Number(req.params.id), userId, role, userId);
 
     if (result.changes === 0) {
       return res.status(404).json({
@@ -78,11 +120,23 @@ router.patch("/:id/read", authenticateToken, (req, res) => {
 // Mark all notifications belonging to the current user as read
 router.patch("/read-all", authenticateToken, (req, res) => {
   try {
+    const userId = Number(req.user.id);
+    const role = String(req.user.role || "").toLowerCase();
+
     db.prepare(`
       UPDATE notifications
       SET is_read = 1
-      WHERE user_id = ? AND is_read = 0
-    `).run(Number(req.user.id));
+      WHERE user_id = ?
+        AND is_read = 0
+        AND (
+          ? != 'employee'
+          OR EXISTS (
+            SELECT 1 FROM tickets t
+            WHERE t.id = notifications.ticket_id
+              AND t.requester_id = ?
+          )
+        )
+    `).run(userId, role, userId);
 
     res.json({ message: "All notifications marked as read." });
   } catch (error) {
@@ -93,6 +147,70 @@ router.patch("/read-all", authenticateToken, (req, res) => {
   }
 });
 
+
+// Admin: Remind IT Staff about all outstanding assigned tickets
+router.post("/remind-all", authenticateToken, (req, res) => {
+  try {
+    if (String(req.user.role || "").toLowerCase() !== "admin") {
+      return res.status(403).json({
+        message: "Only Admin can send ticket reminders.",
+      });
+    }
+
+    const tickets = db.prepare(`
+      SELECT
+        id,
+        ticket_number,
+        title,
+        assigned_to
+      FROM tickets
+      WHERE assigned_to IS NOT NULL
+        AND status NOT IN ('Resolved', 'Closed')
+    `).all();
+
+    const insert = db.prepare(`
+      INSERT INTO notifications (
+        user_id,
+        ticket_id,
+        type,
+        title,
+        message
+      )
+      SELECT ?, ?, 'admin_reminder', ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM notifications
+        WHERE user_id = ?
+          AND ticket_id = ?
+          AND type = 'admin_reminder'
+          AND date(created_at) = date('now', 'localtime')
+      )
+    `);
+
+    let created = 0;
+
+    for (const ticket of tickets) {
+      created += insert.run(
+        ticket.assigned_to,
+        ticket.id,
+        `Reminder: ${ticket.ticket_number}`,
+        `${ticket.title} is still outstanding. Please review this ticket.`,
+        ticket.assigned_to,
+        ticket.id
+      ).changes;
+    }
+
+    res.json({
+      message: "IT Staff reminders sent successfully.",
+      created,
+    });
+  } catch (error) {
+    console.error("Failed to send ticket reminders:", error);
+    res.status(500).json({
+      message: "Failed to send ticket reminders.",
+    });
+  }
+});
 
 router.post("/check-sla", authenticateToken, (req, res) => {
   try {

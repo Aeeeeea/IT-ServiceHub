@@ -21,7 +21,7 @@ app.use(
   cors({
     origin: true, // Dynamically allow incoming origin (localhost:5173, 5174, etc.)
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
   })
 );
@@ -112,7 +112,6 @@ app.use((error, req, res, next) => {
 // START SERVER
 // ==========================================
 
-app.listen(PORT, () => {
-  console.log(`IT ServiceHub API running on http://localhost:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`IT ServiceHub API running on port ${PORT}`);
 });
-

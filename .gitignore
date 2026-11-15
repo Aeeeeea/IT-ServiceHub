@@ -1,1 +1,10 @@
 node_modules
+
+# Local SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Local files
+.DS_Store
+backend/uploads/

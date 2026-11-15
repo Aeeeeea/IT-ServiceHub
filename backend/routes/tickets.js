@@ -338,6 +338,41 @@ if (req.files && req.files.length > 0) {
     );
   }
 }
+
+
+// Notify all Admin users whenever a new ticket is created
+const adminUsers = db.prepare(`
+  SELECT id
+  FROM users
+  WHERE LOWER(TRIM(role)) = 'admin'
+`).all();
+
+notifyUsers(
+  adminUsers.map((user) => user.id),
+  {
+    ticketId: result.lastInsertRowid,
+    type: selectedPriority === "Critical"
+      ? "critical_ticket"
+      : "ticket_created",
+    title: selectedPriority === "Critical"
+      ? `New Critical Ticket: ${ticketNumber}`
+      : `New Ticket: ${ticketNumber}`,
+    message: `${title.trim()} - ${selectedPriority} priority ticket created.`,
+  }
+);
+
+
+    // Notify IT Staff when a new ticket is assigned
+    if (assigned_to) {
+      createNotification({
+        userId: assigned_to,
+        ticketId: result.lastInsertRowid,
+        type: "ticket_assigned",
+        title: "A new ticket has been assigned to you",
+        message: `${ticketNumber}: ${title.trim()}`,
+      });
+    }
+
     const ticket = getFullTicket(String(result.lastInsertRowid));
 
     res.status(201).json({

@@ -7,32 +7,59 @@ const { authenticateToken } = require("../middleware/auth");
 // ==========================================
 // ADMIN-ONLY MIDDLEWARE
 // ==========================================
-function requireAdmin(req, res, next) {
-  if (req.user?.role !== "admin") {
+function requireUserManager(req, res, next) {
+  const role = String(req.user?.role || "")
+    .trim()
+    .toLowerCase();
+
+  if (!["admin", "it_staff"].includes(role)) {
     return res.status(403).json({
-      message: "Only Admin can perform this action.",
+      message: "Only Admin and IT Staff can manage users.",
     });
   }
+
+  next();
+}
+function requireAdmin(req, res, next) {
+  const role = String(req.user?.role || "")
+    .trim()
+    .toLowerCase();
+
+  if (role !== "admin") {
+    return res.status(403).json({
+      message: "Only Admin can delete users.",
+    });
+  }
+
   next();
 }
 
 // ==========================================
 // GET ALL USERS (GET /api/users)
 // ==========================================
-router.get("/", (req, res) => {
+router.get("/", authenticateToken, (req, res) => {
   try {
-    const users = db
-      .prepare(`
-        SELECT
-          id,
-          name,
-          email,
-          role,
-          created_at
-        FROM users
-        ORDER BY name ASC
-      `)
-      .all();
+    const role = String(req.user?.role || "")
+      .trim()
+      .toLowerCase();
+
+    let query = `
+      SELECT id, name, email, role, created_at
+      FROM users
+    `;
+
+    // Employees can only see IT Staff and Admin
+    if (role === "employee") {
+      query += ` WHERE role IN ('it_staff', 'admin')`;
+    } else if (!["admin", "it_staff"].includes(role)) {
+      return res.status(403).json({
+        message: "You do not have permission to view users.",
+      });
+    }
+
+    query += ` ORDER BY name ASC`;
+
+    const users = db.prepare(query).all();
 
     res.json(users);
   } catch (error) {
@@ -65,8 +92,18 @@ router.get("/it-staff", authenticateToken, (req, res) => {
 // ==========================================
 // GET ONE USER (GET /api/users/:id)
 // ==========================================
-router.get("/:id", (req, res) => {
+router.get("/:id", authenticateToken, (req, res) => {
   try {
+    const role = String(req.user?.role || "")
+      .trim()
+      .toLowerCase();
+
+    if (!["admin", "it_staff", "employee"].includes(role)) {
+      return res.status(403).json({
+        message: "You do not have permission to view users.",
+      });
+    }
+
     const user = db
       .prepare(`
         SELECT
@@ -83,6 +120,18 @@ router.get("/:id", (req, res) => {
     if (!user) {
       return res.status(404).json({
         message: "User not found.",
+      });
+    }
+
+    // Employees cannot view other employee accounts
+    if (
+      role === "employee" &&
+      !["it_staff", "admin"].includes(
+        String(user.role).toLowerCase()
+      )
+    ) {
+      return res.status(403).json({
+        message: "You cannot view this user.",
       });
     }
 
@@ -174,7 +223,7 @@ router.post("/", authenticateToken, requireAdmin, async (req, res) => {
 // ==========================================
 // UPDATE USER (PUT /api/users/:id)
 // ==========================================
-router.put("/:id", async (req, res) => {
+router.put("/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { name, email, role } = req.body;
     const userId = req.params.id;
