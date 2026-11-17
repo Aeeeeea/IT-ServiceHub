@@ -2938,6 +2938,12 @@ body:has(.add-user-overlay) {
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-md);
 }
+.analytics-coverage h1,
+.analytics-coverage h2,
+.analytics-coverage h3,
+.analytics-coverage .coverage-title {
+  color: #093367 !important;
+}
 .coverage-header { margin-bottom: 18px; }
 .coverage-header h3 { color: #ffffff; font-size: 15px; font-weight: 600; }
 .coverage-header p { color: #9db8c8; font-size: 12.5px; }

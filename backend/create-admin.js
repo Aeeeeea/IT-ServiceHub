@@ -1,38 +1,53 @@
+require("dotenv").config();
+
 const bcrypt = require("bcryptjs");
-const db = require("./database");
+const db = require("./database-pg");
 
-const name = "System Admin";
-const email = "admin@servicehub.com";
-const password = "Admin123!";
+async function createAdmin() {
+  const name = process.env.ADMIN_NAME;
+  const email = process.env.ADMIN_EMAIL;
+  const password = process.env.ADMIN_PASSWORD;
 
-try {
-  const existingUser = db
-    .prepare("SELECT id FROM users WHERE email = ?")
-    .get(email);
-
-  if (existingUser) {
-    console.log("Admin account already exists.");
-    process.exit(0);
+  if (!name || !email || !password) {
+    throw new Error(
+      "Please provide ADMIN_NAME, ADMIN_EMAIL, and ADMIN_PASSWORD."
+    );
   }
 
-  const hashedPassword = bcrypt.hashSync(password, 10);
+  if (password.length < 8) {
+    throw new Error("Admin password must contain at least 8 characters.");
+  }
 
-  const result = db
-    .prepare(`
-      INSERT INTO users (name, email, password, role)
-      VALUES (?, ?, ?, ?)
-    `)
-    .run(name, email, hashedPassword, "admin");
+  try {
+    const existingUser = await db.query(
+      "SELECT id FROM users WHERE LOWER(email) = LOWER($1)",
+      [email]
+    );
 
-  console.log("Admin account created successfully!");
-  console.log("--------------------------------");
-  console.log("Name:", name);
-  console.log("Email:", email);
-  console.log("Password:", password);
-  console.log("Role: admin");
-  console.log("User ID:", result.lastInsertRowid);
-} catch (error) {
-  console.error("Failed to create admin:", error);
-} finally {
-  db.close();
+    if (existingUser.rows.length > 0) {
+      console.log("Admin account already exists.");
+      return;
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const result = await db.query(
+      `
+        INSERT INTO users (name, email, password, role)
+        VALUES ($1, $2, $3, 'admin')
+        RETURNING id, name, email, role
+      `,
+      [name, email, hashedPassword]
+    );
+
+    console.log("Admin account created successfully!");
+    console.log(result.rows[0]);
+  } finally {
+    await db.end();
+  }
 }
+
+createAdmin().catch((error) => {
+  console.error("Failed to create admin:", error.message);
+  process.exitCode = 1;
+});

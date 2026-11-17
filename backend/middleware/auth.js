@@ -1,8 +1,10 @@
 const jwt = require("jsonwebtoken");
 
-const JWT_SECRET =
-  process.env.JWT_SECRET ||
-  "it_servicehub_secret_change_this_later";
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET is missing from environment variables.");
+}
 
 function authenticateToken(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -19,9 +21,7 @@ function authenticateToken(req, res, next) {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-
     req.user = decoded;
-
     next();
   } catch (error) {
     return res.status(401).json({
@@ -36,8 +36,7 @@ function requireITAccess(req, res, next) {
     req.user.role !== "it_staff"
   ) {
     return res.status(403).json({
-      message:
-        "Only Admin and IT Staff can assign tickets.",
+      message: "Only Admin and IT Staff can assign tickets.",
     });
   }
 

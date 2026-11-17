@@ -1,7 +1,6 @@
-
 const express = require("express");
 const router = express.Router();
-const db = require("../database");
+const db = require("../database-pg");
 const { authenticateToken } = require("../middleware/auth");
 const multer = require("multer");
 const path = require("path");
@@ -49,33 +48,84 @@ const upload = multer({
     if (allowedTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error("Only JPG, PNG, GIF, WEBP, MP4, WEBM, and MOV files are allowed."));
+      cb(
+        new Error(
+          "Only JPG, PNG, GIF, WEBP, MP4, WEBM, and MOV files are allowed."
+        )
+      );
     }
   },
 });
 
-function createNotification({ userId, ticketId = null, type = "general", title, message = "" }) {
+// =========================
+// NOTIFICATION HELPERS
+// =========================
+
+async function createNotification({
+  userId,
+  ticketId = null,
+  type = "general",
+  title,
+  message = "",
+}) {
   if (userId == null || !title) return;
-  db.prepare("INSERT INTO notifications (user_id, ticket_id, type, title, message) VALUES (?, ?, ?, ?, ?)")
-    .run(Number(userId), ticketId, type, title, message);
-}
-function notifyUsers(userIds, payload) {
-  [...new Set((userIds || []).filter(id => id != null).map(Number))].forEach(userId => {
-    if (payload.excludeUserId != null && userId === Number(payload.excludeUserId)) return;
-    createNotification({ ...payload, userId });
-  });
+
+  await db.query(
+    `
+      INSERT INTO notifications (
+        user_id,
+        ticket_id,
+        type,
+        title,
+        message
+      )
+      VALUES ($1, $2, $3, $4, $5)
+    `,
+    [Number(userId), ticketId, type, title, message]
+  );
 }
 
+async function notifyUsers(userIds, payload) {
+  const uniqueUserIds = [
+    ...new Set(
+      (userIds || [])
+        .filter((id) => id != null)
+        .map(Number)
+    ),
+  ];
+
+  await Promise.all(
+    uniqueUserIds.map((userId) => {
+      if (
+        payload.excludeUserId != null &&
+        userId === Number(payload.excludeUserId)
+      ) {
+        return Promise.resolve();
+      }
+
+      return createNotification({
+        ...payload,
+        userId,
+      });
+    })
+  );
+}
 
 // =========================
 // SLA STATUS HELPER
 // =========================
 
+
 function parseDatabaseDate(value) {
   if (!value) return null;
 
+  // PostgreSQL may already return a JavaScript Date object.
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
   const timestamp = String(value).trim().replace(" ", "T");
-  const hasTimezone = /(?:Z|[+-]\\d{2}:?\\d{2})$/i.test(timestamp);
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(timestamp);
 
   const date = new Date(
     hasTimezone ? timestamp : `${timestamp}Z`
@@ -83,6 +133,7 @@ function parseDatabaseDate(value) {
 
   return Number.isNaN(date.getTime()) ? null : date;
 }
+
 
 function getSLAStatus(ticket) {
   const status = String(ticket.status || "").trim().toLowerCase();
@@ -138,9 +189,9 @@ function getSLAStatus(ticket) {
 // HELPER: GET FULL TICKET
 // =========================
 
-function getFullTicket(id) {
-  const ticket = db
-    .prepare(`
+async function getFullTicket(id) {
+  const result = await db.query(
+    `
       SELECT
         tickets.*,
         requester.name AS requester_name,
@@ -151,14 +202,19 @@ function getFullTicket(id) {
         ON tickets.requester_id = requester.id
       LEFT JOIN users AS assignee
         ON tickets.assigned_to = assignee.id
-      WHERE tickets.id = ? OR tickets.ticket_number = ?
-    `)
-    .get(id, id);
+      WHERE tickets.id::text = $1
+         OR tickets.ticket_number = $1
+      LIMIT 1
+    `,
+    [String(id)]
+  );
+
+  const ticket = result.rows[0];
 
   if (!ticket) return null;
 
-  const attachments = db
-    .prepare(`
+  const attachmentResult = await db.query(
+    `
       SELECT
         id,
         original_name,
@@ -167,14 +223,15 @@ function getFullTicket(id) {
         file_size,
         created_at
       FROM ticket_attachments
-      WHERE ticket_id = ?
+      WHERE ticket_id = $1
       ORDER BY created_at ASC
-    `)
-    .all(ticket.id);
+    `,
+    [ticket.id]
+  );
 
   return {
     ...ticket,
-    attachments,
+    attachments: attachmentResult.rows,
   };
 }
 
@@ -182,25 +239,24 @@ function getFullTicket(id) {
 // GET ALL TICKETS
 // =========================
 
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const tickets = db
-      .prepare(`
-        SELECT
-          tickets.*,
-          requester.name AS requester_name,
-          requester.email AS requester_email,
-          assignee.name AS assigned_to_name
-        FROM tickets
-        LEFT JOIN users AS requester
-          ON tickets.requester_id = requester.id
-        LEFT JOIN users AS assignee
-          ON tickets.assigned_to = assignee.id
-        ORDER BY tickets.created_at DESC
-      `)
-      .all();
+    const result = await db.query(`
+      SELECT
+        tickets.*,
+        requester.name AS requester_name,
+        requester.email AS requester_email,
+        assignee.name AS assigned_to_name
+      FROM tickets
+      LEFT JOIN users AS requester
+        ON tickets.requester_id = requester.id
+      LEFT JOIN users AS assignee
+        ON tickets.assigned_to = assignee.id
+      ORDER BY tickets.created_at DESC
+    `);
+
     res.json(
-      tickets.map((ticket) => ({
+      result.rows.map((ticket) => ({
         ...ticket,
         sla_status: getSLAStatus(ticket),
       }))
@@ -218,9 +274,9 @@ router.get("/", (req, res) => {
 // GET ONE TICKET
 // =========================
 
-router.get("/:id", (req, res) => {
+router.get("/:id", async (req, res) => {
   try {
-    const ticket = getFullTicket(req.params.id);
+    const ticket = await getFullTicket(req.params.id);
 
     if (!ticket) {
       return res.status(404).json({
@@ -249,153 +305,171 @@ router.post(
   "/",
   authenticateToken,
   upload.array("attachments", 5),
-  (req, res) => {
-  try {
-    const {
-      title,
-      description,
-      category,
-      priority,
-      requester_id,
-      assigned_to,
-    } = req.body;
+  async (req, res) => {
+    const client = await db.connect();
 
-    if (!title || !category) {
-      return res.status(400).json({
-        message: "Title and category are required.",
-      });
-    }
-
-    const ticketNumber = `IT-${Date.now()}`;
-
-    const slaHours = {
-      Critical: 4,
-      High: 8,
-      Medium: 12,
-      Low: 24,
-    };
-
-    const selectedPriority = priority || "Medium";
-    const slaTargetHours = slaHours[selectedPriority] || 24;
-
-    const slaDeadline = new Date(
-      Date.now() + slaTargetHours * 60 * 60 * 1000
-    )
-      .toISOString()
-      .slice(0, 19)
-      .replace("T", " ");
-
-    const result = db
-      .prepare(`
-        INSERT INTO tickets (
-          ticket_number,
-          title,
-          description,
-          category,
-          priority,
-          requester_id,
-          assigned_to,
-          sla_target_hours,
-          sla_deadline
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-      .run(
-        ticketNumber,
-        title.trim(),
-        description || "",
+    try {
+      const {
+        title,
+        description,
         category,
-        selectedPriority,
-        requester_id || null,
-        assigned_to || null,
-        slaTargetHours,
-        slaDeadline
+        priority,
+        requester_id,
+        assigned_to,
+      } = req.body;
+
+      if (!title || !category) {
+        return res.status(400).json({
+          message: "Title and category are required.",
+        });
+      }
+
+      const ticketNumber = `IT-${Date.now()}`;
+
+      const slaHours = {
+        Critical: 4,
+        High: 8,
+        Medium: 12,
+        Low: 24,
+      };
+
+      const selectedPriority = priority || "Medium";
+      const slaTargetHours = slaHours[selectedPriority] || 24;
+
+      const slaDeadline = new Date(
+        Date.now() + slaTargetHours * 60 * 60 * 1000
       );
-// Save uploaded attachment information
-if (req.files && req.files.length > 0) {
-  const insertAttachment = db.prepare(`
-    INSERT INTO ticket_attachments (
-      ticket_id,
-      original_name,
-      stored_name,
-      file_path,
-      mime_type,
-      file_size,
-      uploaded_by
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
 
-  for (const file of req.files) {
-    insertAttachment.run(
-      result.lastInsertRowid,
-      file.originalname,
-      file.filename,
-      `/uploads/${file.filename}`,
-      file.mimetype,
-      file.size,
-      req.user.id
-    );
-  }
-}
+      await client.query("BEGIN");
 
+      const ticketResult = await client.query(
+        `
+          INSERT INTO tickets (
+            ticket_number,
+            title,
+            description,
+            category,
+            priority,
+            requester_id,
+            assigned_to,
+            sla_target_hours,
+            sla_deadline
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          RETURNING id
+        `,
+        [
+          ticketNumber,
+          title.trim(),
+          description || "",
+          category,
+          selectedPriority,
+          requester_id || null,
+          assigned_to || null,
+          slaTargetHours,
+          slaDeadline,
+        ]
+      );
 
-// Notify all Admin users whenever a new ticket is created
-const adminUsers = db.prepare(`
-  SELECT id
-  FROM users
-  WHERE LOWER(TRIM(role)) = 'admin'
-`).all();
+      const ticketId = ticketResult.rows[0].id;
 
-notifyUsers(
-  adminUsers.map((user) => user.id),
-  {
-    ticketId: result.lastInsertRowid,
-    type: selectedPriority === "Critical"
-      ? "critical_ticket"
-      : "ticket_created",
-    title: selectedPriority === "Critical"
-      ? `New Critical Ticket: ${ticketNumber}`
-      : `New Ticket: ${ticketNumber}`,
-    message: `${title.trim()} - ${selectedPriority} priority ticket created.`,
+      // Save uploaded attachment information.
+      if (req.files && req.files.length > 0) {
+        for (const file of req.files) {
+          await client.query(
+            `
+              INSERT INTO ticket_attachments (
+                ticket_id,
+                original_name,
+                stored_name,
+                file_path,
+                mime_type,
+                file_size,
+                uploaded_by
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `,
+            [
+              ticketId,
+              file.originalname,
+              file.filename,
+              `/uploads/${file.filename}`,
+              file.mimetype,
+              file.size,
+              req.user.id,
+            ]
+          );
+        }
+      }
+
+      await client.query("COMMIT");
+
+      // Notify all Admin users about the new ticket.
+      const adminResult = await db.query(`
+        SELECT id
+        FROM users
+        WHERE LOWER(TRIM(role)) = 'admin'
+      `);
+
+      await notifyUsers(
+        adminResult.rows.map((user) => user.id),
+        {
+          ticketId,
+          type:
+            selectedPriority === "Critical"
+              ? "critical_ticket"
+              : "ticket_created",
+          title:
+            selectedPriority === "Critical"
+              ? `New Critical Ticket: ${ticketNumber}`
+              : `New Ticket: ${ticketNumber}`,
+          message: `${title.trim()} - ${selectedPriority} priority ticket created.`,
+        }
+      );
+
+      // Notify assigned IT staff.
+      if (assigned_to) {
+        await createNotification({
+          userId: assigned_to,
+          ticketId,
+          type: "ticket_assigned",
+          title: "A new ticket has been assigned to you",
+          message: `${ticketNumber}: ${title.trim()}`,
+        });
+      }
+
+      const ticket = await getFullTicket(String(ticketId));
+
+      res.status(201).json({
+        message: "Ticket created successfully.",
+        ticket: {
+          ...ticket,
+          sla_status: getSLAStatus(ticket),
+        },
+      });
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Ticket creation rollback failed:", rollbackError);
+      }
+
+      console.error("Failed to create ticket:", error);
+
+      res.status(500).json({
+        message: "Failed to create ticket.",
+      });
+    } finally {
+      client.release();
+    }
   }
 );
-
-
-    // Notify IT Staff when a new ticket is assigned
-    if (assigned_to) {
-      createNotification({
-        userId: assigned_to,
-        ticketId: result.lastInsertRowid,
-        type: "ticket_assigned",
-        title: "A new ticket has been assigned to you",
-        message: `${ticketNumber}: ${title.trim()}`,
-      });
-    }
-
-    const ticket = getFullTicket(String(result.lastInsertRowid));
-
-    res.status(201).json({
-      message: "Ticket created successfully.",
-      ticket: {
-        ...ticket,
-        sla_status: getSLAStatus(ticket),
-      },
-    });
-  } catch (error) {
-    console.error("Failed to create ticket:", error);
-
-    res.status(500).json({
-      message: "Failed to create ticket.",
-    });
-  }
-});
 
 // =========================
 // UPDATE TICKET
 // =========================
 
-router.put("/:id", authenticateToken, (req, res) => {
+router.put("/:id", authenticateToken, async (req, res) => {
   try {
     const {
       title,
@@ -408,13 +482,17 @@ router.put("/:id", authenticateToken, (req, res) => {
 
     const role = String(req.user?.role || "").toLowerCase();
 
-    const existingTicket = db
-      .prepare(`
+    const existingResult = await db.query(
+      `
         SELECT *
         FROM tickets
-        WHERE id = ? OR ticket_number = ?
-      `)
-      .get(req.params.id, req.params.id);
+        WHERE id::text = $1 OR ticket_number = $1
+        LIMIT 1
+      `,
+      [String(req.params.id)]
+    );
+
+    const existingTicket = existingResult.rows[0];
 
     if (!existingTicket) {
       return res.status(404).json({
@@ -432,11 +510,13 @@ router.put("/:id", authenticateToken, (req, res) => {
       });
     }
 
-    // ASSIGNMENT PERMISSIONS: ADMIN ONLY
-    if (
-      Object.prototype.hasOwnProperty.call(req.body, "assigned_to") &&
-      role !== "admin"
-    ) {
+    const hasAssignedTo = Object.prototype.hasOwnProperty.call(
+      req.body,
+      "assigned_to"
+    );
+
+    // Assignment permissions: Admin only.
+    if (hasAssignedTo && role !== "admin") {
       return res.status(403).json({
         message: "Only administrators can assign tickets.",
       });
@@ -444,7 +524,7 @@ router.put("/:id", authenticateToken, (req, res) => {
 
     // Validate assignment target.
     if (
-      Object.prototype.hasOwnProperty.call(req.body, "assigned_to") &&
+      hasAssignedTo &&
       assigned_to !== null &&
       assigned_to !== ""
     ) {
@@ -456,9 +536,12 @@ router.put("/:id", authenticateToken, (req, res) => {
         });
       }
 
-      const assignee = db
-        .prepare("SELECT id, role FROM users WHERE id = ?")
-        .get(assigneeId);
+      const assigneeResult = await db.query(
+        "SELECT id, role FROM users WHERE id = $1",
+        [assigneeId]
+      );
+
+      const assignee = assigneeResult.rows[0];
 
       if (
         !assignee ||
@@ -467,16 +550,15 @@ router.put("/:id", authenticateToken, (req, res) => {
         )
       ) {
         return res.status(400).json({
-          message: "Tickets can only be assigned to an admin or IT staff member.",
+          message:
+            "Tickets can only be assigned to an admin or IT staff member.",
         });
       }
     }
 
-    // STATUS PERMISSIONS
+    // Status permissions.
     if (status !== undefined) {
-      if (
-        !["admin", "it_staff"].includes(role)
-      ) {
+      if (!["admin", "it_staff"].includes(role)) {
         return res.status(403).json({
           message: "Only admins and IT staff can update ticket status.",
         });
@@ -496,7 +578,7 @@ router.put("/:id", authenticateToken, (req, res) => {
         });
       }
 
-      // Only an admin or the assigned IT staff member can resolve.
+      // Only an admin or assigned IT staff member can resolve.
       if (status === "Resolved" && role !== "admin") {
         const userId = req.user?.id;
 
@@ -506,7 +588,8 @@ router.put("/:id", authenticateToken, (req, res) => {
           String(existingTicket.assigned_to) !== String(userId)
         ) {
           return res.status(403).json({
-            message: "Only the assigned IT staff member or an admin can resolve this ticket.",
+            message:
+              "Only the assigned IT staff member or an admin can resolve this ticket.",
           });
         }
       }
@@ -519,69 +602,77 @@ router.put("/:id", authenticateToken, (req, res) => {
       }
     }
 
-    const hasAssignedTo = Object.prototype.hasOwnProperty.call(
-      req.body,
-      "assigned_to"
+    const assignedValue =
+      hasAssignedTo && assigned_to !== ""
+        ? assigned_to ?? null
+        : null;
+
+    // Update ticket using PostgreSQL parameters.
+    await db.query(
+      `
+        UPDATE tickets
+        SET
+          title = COALESCE($1, title),
+          description = COALESCE($2, description),
+          category = COALESCE($3, category),
+          priority = COALESCE($4, priority),
+          status = COALESCE($5, status),
+
+          assigned_to = CASE
+            WHEN $6::boolean THEN $7::integer
+            ELSE assigned_to
+          END,
+
+          resolved_at = CASE
+            WHEN COALESCE($8, status) IN ('Resolved', 'Closed')
+              AND status NOT IN ('Resolved', 'Closed')
+              THEN CURRENT_TIMESTAMP
+
+            WHEN COALESCE($9, status) NOT IN ('Resolved', 'Closed')
+              THEN NULL
+
+            ELSE resolved_at
+          END,
+
+          updated_at = CURRENT_TIMESTAMP
+
+        WHERE id::text = $10 OR ticket_number = $10
+      `,
+      [
+        title ?? null,
+        description ?? null,
+        category ?? null,
+        priority ?? null,
+        status ?? null,
+        hasAssignedTo,
+        assignedValue,
+        status ?? null,
+        status ?? null,
+        String(req.params.id),
+      ]
     );
 
-// UPDATE TICKET
-db.prepare(`
-  UPDATE tickets
-  SET
-    title = COALESCE(?, title),
-    description = COALESCE(?, description),
-    category = COALESCE(?, category),
-    priority = COALESCE(?, priority),
-    status = COALESCE(?, status),
-
-    assigned_to = CASE
-      WHEN ? = 1 THEN ?
-      ELSE assigned_to
-    END,
-
-    resolved_at = CASE
-      WHEN COALESCE(?, status) IN ('Resolved', 'Closed')
-        AND status NOT IN ('Resolved', 'Closed')
-        THEN CURRENT_TIMESTAMP
-
-      WHEN COALESCE(?, status) NOT IN ('Resolved', 'Closed')
-        THEN NULL
-
-      ELSE resolved_at
-    END,
-
-    updated_at = CURRENT_TIMESTAMP
-
-  WHERE id = ? OR ticket_number = ?
-`).run(
-  title ?? null,
-  description ?? null,
-  category ?? null,
-  priority ?? null,
-  status ?? null,
-  hasAssignedTo ? 1 : 0,
-  hasAssignedTo && assigned_to !== "" ? assigned_to ?? null : null,
-  status ?? null,
-  status ?? null,
-  req.params.id,
-  req.params.id
-);
-
-    const updatedTicket = getFullTicket(req.params.id);
+    const updatedTicket = await getFullTicket(req.params.id);
 
     // Create notifications after the ticket update succeeds.
     try {
       const actorId = Number(req.user.id);
+
       const assignmentChanged =
         hasAssignedTo &&
-        String(assigned_to ?? "") !== String(existingTicket.assigned_to ?? "");
+        String(assignedValue ?? "") !==
+          String(existingTicket.assigned_to ?? "");
 
       const statusChanged =
-        status !== undefined && status !== existingTicket.status;
+        status !== undefined &&
+        status !== existingTicket.status;
 
       if (statusChanged) {
-        notifyUsers(
-          [existingTicket.requester_id, updatedTicket.assigned_to],
+        await notifyUsers(
+          [
+            existingTicket.requester_id,
+            updatedTicket.assigned_to,
+          ],
           {
             ticketId: updatedTicket.id,
             type: "ticket_status",
@@ -594,23 +685,36 @@ db.prepare(`
 
       const generalFieldsChanged =
         (title !== undefined && title !== existingTicket.title) ||
-        (description !== undefined && description !== existingTicket.description) ||
-        (category !== undefined && category !== existingTicket.category) ||
-        (priority !== undefined && priority !== existingTicket.priority);
+        (description !== undefined &&
+          description !== existingTicket.description) ||
+        (category !== undefined &&
+          category !== existingTicket.category) ||
+        (priority !== undefined &&
+          priority !== existingTicket.priority);
 
-      if (generalFieldsChanged && !statusChanged && !assignmentChanged) {
-        notifyUsers([existingTicket.requester_id, updatedTicket.assigned_to], {
-          ticketId: updatedTicket.id,
-          type: "ticket_updated",
-          title: `Ticket ${updatedTicket.ticket_number} updated`,
-          message: `${updatedTicket.title} was updated.`,
-          excludeUserId: actorId,
-        });
+      if (
+        generalFieldsChanged &&
+        !statusChanged &&
+        !assignmentChanged
+      ) {
+        await notifyUsers(
+          [
+            existingTicket.requester_id,
+            updatedTicket.assigned_to,
+          ],
+          {
+            ticketId: updatedTicket.id,
+            type: "ticket_updated",
+            title: `Ticket ${updatedTicket.ticket_number} updated`,
+            message: `${updatedTicket.title} was updated.`,
+            excludeUserId: actorId,
+          }
+        );
       }
 
       if (assignmentChanged) {
         if (updatedTicket.assigned_to != null) {
-          createNotification({
+          await createNotification({
             userId: updatedTicket.assigned_to,
             ticketId: updatedTicket.id,
             type: "ticket_assigned",
@@ -619,18 +723,24 @@ db.prepare(`
           });
         }
 
-        notifyUsers([existingTicket.requester_id], {
-          ticketId: updatedTicket.id,
-          type: "ticket_assignment",
-          title: "Ticket assignment updated",
-          message: updatedTicket.assigned_to_name
-            ? `Assigned to ${updatedTicket.assigned_to_name}.`
-            : "The ticket is no longer assigned.",
-          excludeUserId: actorId,
-        });
+        await notifyUsers(
+          [existingTicket.requester_id],
+          {
+            ticketId: updatedTicket.id,
+            type: "ticket_assignment",
+            title: "Ticket assignment updated",
+            message: updatedTicket.assigned_to_name
+              ? `Assigned to ${updatedTicket.assigned_to_name}.`
+              : "The ticket is no longer assigned.",
+            excludeUserId: actorId,
+          }
+        );
       }
     } catch (notificationError) {
-      console.error("Ticket updated, but notification creation failed:", notificationError);
+      console.error(
+        "Ticket updated, but notification creation failed:",
+        notificationError
+      );
     }
 
     res.json({
@@ -654,7 +764,9 @@ db.prepare(`
 // ADMIN ONLY
 // =========================
 
-router.delete("/:id", authenticateToken, (req, res) => {
+router.delete("/:id", authenticateToken, async (req, res) => {
+  const client = await db.connect();
+
   try {
     const role = String(req.user?.role || "").toLowerCase();
 
@@ -666,13 +778,17 @@ router.delete("/:id", authenticateToken, (req, res) => {
 
     const { id } = req.params;
 
-    const ticket = db
-      .prepare(`
+    const ticketResult = await client.query(
+      `
         SELECT id
         FROM tickets
-        WHERE id = ? OR ticket_number = ?
-      `)
-      .get(id, id);
+        WHERE id::text = $1 OR ticket_number = $1
+        LIMIT 1
+      `,
+      [String(id)]
+    );
+
+    const ticket = ticketResult.rows[0];
 
     if (!ticket) {
       return res.status(404).json({
@@ -680,35 +796,31 @@ router.delete("/:id", authenticateToken, (req, res) => {
       });
     }
 
-    const deleteTicket = db.transaction((ticketId) => {
-      db.prepare(
-        "DELETE FROM ticket_comments WHERE ticket_id = ?"
-      ).run(ticketId);
+    await client.query("BEGIN");
 
-      for (const table of ["ticket_logs", "sla_history"]) {
-        const exists = db
-          .prepare(`
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table' AND name = ?
-          `)
-          .get(table);
+    await client.query(
+      "DELETE FROM ticket_comments WHERE ticket_id = $1",
+      [ticket.id]
+    );
 
-        if (exists) {
-          db.prepare(
-            `DELETE FROM "${table}" WHERE ticket_id = ?`
-          ).run(ticketId);
-        }
-      }
+    await client.query(
+      "DELETE FROM ticket_attachments WHERE ticket_id = $1",
+      [ticket.id]
+    );
 
-      return db
-        .prepare("DELETE FROM tickets WHERE id = ?")
-        .run(ticketId);
-    });
+    await client.query(
+      "DELETE FROM notifications WHERE ticket_id = $1",
+      [ticket.id]
+    );
 
-    const result = deleteTicket(ticket.id);
+    const deleteResult = await client.query(
+      "DELETE FROM tickets WHERE id = $1",
+      [ticket.id]
+    );
 
-    if (result.changes === 0) {
+    await client.query("COMMIT");
+
+    if (deleteResult.rowCount === 0) {
       return res.status(404).json({
         message: "Ticket not found.",
       });
@@ -718,11 +830,19 @@ router.delete("/:id", authenticateToken, (req, res) => {
       message: "Ticket deleted successfully.",
     });
   } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.error("Ticket deletion rollback failed:", rollbackError);
+    }
+
     console.error("Failed to delete ticket:", error);
 
     res.status(500).json({
       message: "Failed to delete ticket.",
     });
+  } finally {
+    client.release();
   }
 });
 

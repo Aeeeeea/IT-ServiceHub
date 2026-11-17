@@ -1,7 +1,7 @@
 const express = require("express");
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 const router = express.Router();
-const db = require("../database");
+const db = require("../database-pg");
 const { authenticateToken } = require("../middleware/auth");
 
 // ==========================================
@@ -20,6 +20,7 @@ function requireUserManager(req, res, next) {
 
   next();
 }
+
 function requireAdmin(req, res, next) {
   const role = String(req.user?.role || "")
     .trim()
@@ -35,9 +36,9 @@ function requireAdmin(req, res, next) {
 }
 
 // ==========================================
-// GET ALL USERS (GET /api/users)
+// GET ALL USERS
 // ==========================================
-router.get("/", authenticateToken, (req, res) => {
+router.get("/", authenticateToken, async (req, res) => {
   try {
     const role = String(req.user?.role || "")
       .trim()
@@ -48,7 +49,6 @@ router.get("/", authenticateToken, (req, res) => {
       FROM users
     `;
 
-    // Employees can only see IT Staff and Admin
     if (role === "employee") {
       query += ` WHERE role IN ('it_staff', 'admin')`;
     } else if (!["admin", "it_staff"].includes(role)) {
@@ -59,40 +59,44 @@ router.get("/", authenticateToken, (req, res) => {
 
     query += ` ORDER BY name ASC`;
 
-    const users = db.prepare(query).all();
+    const result = await db.query(query);
 
-    res.json(users);
+    res.json(result.rows);
   } catch (error) {
     console.error("Failed to load users:", error);
+
     res.status(500).json({
       message: "Failed to load users.",
     });
   }
 });
-// GET IT STAFF MEMBERS (for ticket assignment)
-router.get("/it-staff", authenticateToken, (req, res) => {
-  try {
-    const members = db
-      .prepare(`
-        SELECT id, name, email
-        FROM users
-        WHERE role = 'it_staff'
-        ORDER BY name ASC
-      `)
-      .all();
 
-    res.json(members);
+// ==========================================
+// GET IT STAFF MEMBERS
+// ==========================================
+router.get("/it-staff", authenticateToken, async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT id, name, email
+      FROM users
+      WHERE role = 'it_staff'
+      ORDER BY name ASC
+    `);
+
+    res.json(result.rows);
   } catch (error) {
     console.error("Failed to load IT Staff:", error);
+
     res.status(500).json({
       message: "Failed to load IT Staff.",
     });
   }
 });
+
 // ==========================================
-// GET ONE USER (GET /api/users/:id)
+// GET ONE USER
 // ==========================================
-router.get("/:id", authenticateToken, (req, res) => {
+router.get("/:id", authenticateToken, async (req, res) => {
   try {
     const role = String(req.user?.role || "")
       .trim()
@@ -104,18 +108,16 @@ router.get("/:id", authenticateToken, (req, res) => {
       });
     }
 
-    const user = db
-      .prepare(`
-        SELECT
-          id,
-          name,
-          email,
-          role,
-          created_at
+    const result = await db.query(
+      `
+        SELECT id, name, email, role, created_at
         FROM users
-        WHERE id = ?
-      `)
-      .get(req.params.id);
+        WHERE id = $1
+      `,
+      [req.params.id]
+    );
+
+    const user = result.rows[0];
 
     if (!user) {
       return res.status(404).json({
@@ -123,7 +125,6 @@ router.get("/:id", authenticateToken, (req, res) => {
       });
     }
 
-    // Employees cannot view other employee accounts
     if (
       role === "employee" &&
       !["it_staff", "admin"].includes(
@@ -138,6 +139,7 @@ router.get("/:id", authenticateToken, (req, res) => {
     res.json(user);
   } catch (error) {
     console.error("Failed to load user:", error);
+
     res.status(500).json({
       message: "Failed to load user.",
     });
@@ -145,7 +147,7 @@ router.get("/:id", authenticateToken, (req, res) => {
 });
 
 // ==========================================
-// CREATE USER (POST /api/users)
+// CREATE USER
 // ==========================================
 router.post("/", authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -174,46 +176,41 @@ router.post("/", authenticateToken, requireAdmin, async (req, res) => {
 
     const cleanEmail = String(email).trim().toLowerCase();
 
-    // Check if account already exists
-    const existingUser = db
-      .prepare("SELECT id FROM users WHERE email = ?")
-      .get(cleanEmail);
+    const existingUser = await db.query(
+      "SELECT id FROM users WHERE email = $1",
+      [cleanEmail]
+    );
 
-    if (existingUser) {
+    if (existingUser.rows.length > 0) {
       return res.status(409).json({
         message: "An account with this email already exists.",
       });
     }
 
-    // Hash password securely
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const result = db
-      .prepare(`
+    const result = await db.query(
+      `
         INSERT INTO users (name, email, password, role)
-        VALUES (?, ?, ?, ?)
-      `)
-      .run(name.trim(), cleanEmail, hashedPassword, userRole);
-
-    const newUser = db
-      .prepare(`
-        SELECT
-          id,
-          name,
-          email,
-          role,
-          created_at
-        FROM users
-        WHERE id = ?
-      `)
-      .get(result.lastInsertRowid);
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, name, email, role, created_at
+      `,
+      [name.trim(), cleanEmail, hashedPassword, userRole]
+    );
 
     res.status(201).json({
       message: "User created successfully.",
-      user: newUser,
+      user: result.rows[0],
     });
   } catch (error) {
     console.error("Failed to create user:", error);
+
+    if (error.code === "23505") {
+      return res.status(409).json({
+        message: "An account with this email already exists.",
+      });
+    }
+
     res.status(500).json({
       message: error.message || "Failed to create user.",
     });
@@ -221,7 +218,7 @@ router.post("/", authenticateToken, requireAdmin, async (req, res) => {
 });
 
 // ==========================================
-// UPDATE USER (PUT /api/users/:id)
+// UPDATE USER
 // ==========================================
 router.put("/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -244,59 +241,56 @@ router.put("/:id", authenticateToken, requireAdmin, async (req, res) => {
 
     const cleanEmail = String(email).trim().toLowerCase();
 
-    const existingUser = db
-      .prepare(`
+    const existingUser = await db.query(
+      `
         SELECT id
         FROM users
-        WHERE email = ?
-        AND id != ?
-      `)
-      .get(cleanEmail, userId);
+        WHERE email = $1
+        AND id != $2
+      `,
+      [cleanEmail, userId]
+    );
 
-    if (existingUser) {
+    if (existingUser.rows.length > 0) {
       return res.status(409).json({
         message: "Another account with this email already exists.",
       });
     }
 
-    const user = db
-      .prepare("SELECT id FROM users WHERE id = ?")
-      .get(userId);
+    const user = await db.query(
+      "SELECT id FROM users WHERE id = $1",
+      [userId]
+    );
 
-    if (!user) {
+    if (user.rows.length === 0) {
       return res.status(404).json({
         message: "User not found.",
       });
     }
 
-    db.prepare(`
-      UPDATE users
-      SET
-        name = ?,
-        email = ?,
-        role = ?
-      WHERE id = ?
-    `).run(name.trim(), cleanEmail, role, userId);
-
-    const updatedUser = db
-      .prepare(`
-        SELECT
-          id,
-          name,
-          email,
-          role,
-          created_at
-        FROM users
-        WHERE id = ?
-      `)
-      .get(userId);
+    const result = await db.query(
+      `
+        UPDATE users
+        SET name = $1, email = $2, role = $3
+        WHERE id = $4
+        RETURNING id, name, email, role, created_at
+      `,
+      [name.trim(), cleanEmail, role, userId]
+    );
 
     res.json({
       message: "User updated successfully.",
-      user: updatedUser,
+      user: result.rows[0],
     });
   } catch (error) {
     console.error("Failed to update user:", error);
+
+    if (error.code === "23505") {
+      return res.status(409).json({
+        message: "Another account with this email already exists.",
+      });
+    }
+
     res.status(500).json({
       message: "Failed to update user.",
     });
@@ -304,36 +298,50 @@ router.put("/:id", authenticateToken, requireAdmin, async (req, res) => {
 });
 
 // ==========================================
-// DELETE USER (DELETE /api/users/:id)
+// DELETE USER
 // ==========================================
-router.delete("/:id", authenticateToken, requireAdmin, (req, res) => {
+router.delete("/:id", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const userId = req.params.id;
 
-    // Prevent Admin from deleting their own account
     if (Number(userId) === Number(req.user?.id)) {
       return res.status(400).json({
         message: "You cannot delete your own account.",
       });
     }
 
-    const user = db
-      .prepare("SELECT id, name, email, role FROM users WHERE id = ?")
-      .get(userId);
+    const user = await db.query(
+      `
+        SELECT id, name, email, role
+        FROM users
+        WHERE id = $1
+      `,
+      [userId]
+    );
 
-    if (!user) {
+    if (user.rows.length === 0) {
       return res.status(404).json({
         message: "User not found.",
       });
     }
 
-    db.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    await db.query(
+      "DELETE FROM users WHERE id = $1",
+      [userId]
+    );
 
     res.json({
       message: "User deleted successfully.",
     });
   } catch (error) {
     console.error("Failed to delete user:", error);
+
+    if (error.code === "23503") {
+      return res.status(409).json({
+        message: "This user is linked to existing records and cannot be deleted.",
+      });
+    }
+
     res.status(500).json({
       message: "Failed to delete user.",
     });

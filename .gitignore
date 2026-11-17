@@ -14,3 +14,26 @@ backend/.env
 
 # Ignore the separate older project copy
 IT-ServiceHub/
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+
+# Dependencies
+node_modules/
+
+# Build files
+dist/
+
+# Local SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# System files
+.DS_Store
+
+# Backup JavaScript files
+*.backup.js

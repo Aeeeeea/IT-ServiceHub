@@ -1,6 +1,5 @@
-
 const express = require("express");
-const db = require("../database");
+const db = require("../database-pg");
 const { authenticateToken } = require("../middleware/auth");
 
 const router = express.Router();
@@ -115,7 +114,7 @@ const externalArticles = [
 // GET KNOWLEDGE BASE ARTICLES
 // ==========================================
 
-router.get("/", authenticateToken, (req, res) => {
+router.get("/", authenticateToken, async (req, res) => {
   try {
     const q = String(req.query.q || "").trim().toLowerCase();
     const category = String(req.query.category || "").trim().toLowerCase();
@@ -123,56 +122,57 @@ router.get("/", authenticateToken, (req, res) => {
     const searchTerm = `%${q}%`;
     const categoryTerm = `%${category}%`;
 
-    // Get local SQLite articles
-    const localArticles = db.prepare(`
-      SELECT
-        id,
-        title,
-        category,
-        content,
-        keywords,
-        external_url,
-        created_by,
-        created_at,
-        updated_at
-      FROM knowledge_articles
-      WHERE
-        (? = '' OR
-          LOWER(title) LIKE ? OR
-          LOWER(category) LIKE ? OR
-          LOWER(content) LIKE ? OR
-          LOWER(keywords) LIKE ?)
-        AND
-        (? = '' OR LOWER(category) LIKE ?)
-      ORDER BY updated_at DESC
-      LIMIT 100
-    `).all(
-      q,
-      searchTerm,
-      searchTerm,
-      searchTerm,
-      searchTerm,
-      category,
-      categoryTerm
-    ).map(article => ({
+    const result = await db.query(
+      `
+        SELECT
+          id,
+          title,
+          category,
+          content,
+          keywords,
+          external_url,
+          created_by,
+          created_at,
+          updated_at
+        FROM knowledge_articles
+        WHERE
+          (
+            $1 = ''
+            OR LOWER(title) LIKE $2
+            OR LOWER(category) LIKE $2
+            OR LOWER(content) LIKE $2
+            OR LOWER(keywords) LIKE $2
+          )
+          AND (
+            $3 = ''
+            OR LOWER(category) LIKE $4
+          )
+        ORDER BY updated_at DESC
+        LIMIT 100
+      `,
+      [q, searchTerm, category, categoryTerm]
+    );
+
+    const localArticles = result.rows.map((article) => ({
       ...article,
       source: article.external_url
         ? "External Support"
         : "Local Knowledge Base",
       type: "local",
-      url: article.external_url || null
+      url: article.external_url || null,
     }));
 
-    // Search external support articles
     const filteredExternal = externalArticles
-      .filter(article => {
+      .filter((article) => {
         const searchableText = [
           article.title,
           article.category,
           article.content,
           article.keywords,
-          article.source
-        ].join(" ").toLowerCase();
+          article.source,
+        ]
+          .join(" ")
+          .toLowerCase();
 
         const matchesSearch =
           !q || searchableText.includes(q);
@@ -183,21 +183,20 @@ router.get("/", authenticateToken, (req, res) => {
 
         return matchesSearch && matchesCategory;
       })
-      .map(article => ({
+      .map((article) => ({
         ...article,
-        type: "external"
+        type: "external",
       }));
 
     res.json([
       ...localArticles,
-      ...filteredExternal
+      ...filteredExternal,
     ]);
-
   } catch (error) {
     console.error("Knowledge Base search failed:", error);
 
     res.status(500).json({
-      message: "Failed to search Knowledge Base."
+      message: "Failed to search Knowledge Base.",
     });
   }
 });
@@ -206,7 +205,7 @@ router.get("/", authenticateToken, (req, res) => {
 // CREATE KNOWLEDGE BASE ARTICLE
 // ==========================================
 
-router.post("/", authenticateToken, (req, res) => {
+router.post("/", authenticateToken, async (req, res) => {
   try {
     const role = String(req.user.role || "")
       .trim()
@@ -215,7 +214,7 @@ router.post("/", authenticateToken, (req, res) => {
 
     if (!["admin", "staff", "it_staff"].includes(role)) {
       return res.status(403).json({
-        message: "Only administrators and IT staff can create articles."
+        message: "Only administrators and IT staff can create articles.",
       });
     }
 
@@ -233,11 +232,10 @@ router.post("/", authenticateToken, (req, res) => {
 
     if (!title || !content) {
       return res.status(400).json({
-        message: "Title and content are required."
+        message: "Title and content are required.",
       });
     }
 
-    // Validate optional support URL
     if (external_url) {
       try {
         const parsedUrl = new URL(external_url);
@@ -247,35 +245,35 @@ router.post("/", authenticateToken, (req, res) => {
         }
       } catch {
         return res.status(400).json({
-          message: "Please enter a valid HTTP or HTTPS URL."
+          message: "Please enter a valid HTTP or HTTPS URL.",
         });
       }
     }
 
-    const result = db.prepare(`
-      INSERT INTO knowledge_articles (
+    const result = await db.query(
+      `
+        INSERT INTO knowledge_articles (
+          title,
+          category,
+          content,
+          keywords,
+          external_url,
+          created_by
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING *
+      `,
+      [
         title,
         category,
         content,
         keywords,
-        external_url,
-        created_by
-      )
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      title,
-      category,
-      content,
-      keywords,
-      external_url || null,
-      Number(req.user.id)
+        external_url || null,
+        Number(req.user.id),
+      ]
     );
 
-    const createdArticle = db.prepare(`
-      SELECT *
-      FROM knowledge_articles
-      WHERE id = ?
-    `).get(result.lastInsertRowid);
+    const createdArticle = result.rows[0];
 
     res.status(201).json({
       ...createdArticle,
@@ -283,14 +281,13 @@ router.post("/", authenticateToken, (req, res) => {
         ? "External Support"
         : "Local Knowledge Base",
       type: "local",
-      url: createdArticle.external_url || null
+      url: createdArticle.external_url || null,
     });
-
   } catch (error) {
     console.error("Failed to create Knowledge Base article:", error);
 
     res.status(500).json({
-      message: "Failed to create article."
+      message: "Failed to create article.",
     });
   }
 });

@@ -1,12 +1,15 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const db = require("../database");
+const db = require("../database-pg");
 
 const router = express.Router();
 
-const JWT_SECRET =
-  process.env.JWT_SECRET || "it_servicehub_secret_change_this_later";
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET is missing from environment variables.");
+}
 
 // REGISTER
 router.post("/register", async (req, res) => {
@@ -27,11 +30,12 @@ router.post("/register", async (req, res) => {
 
     const cleanEmail = email.trim().toLowerCase();
 
-    const existingUser = db
-      .prepare("SELECT id FROM users WHERE email = ?")
-      .get(cleanEmail);
+    const existingUser = await db.query(
+      "SELECT id FROM users WHERE email = $1",
+      [cleanEmail]
+    );
 
-    if (existingUser) {
+    if (existingUser.rows.length > 0) {
       return res.status(409).json({
         message: "An account with this email already exists.",
       });
@@ -39,25 +43,25 @@ router.post("/register", async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const result = db
-      .prepare(
-        `INSERT INTO users (name, email, password, role)
-         VALUES (?, ?, ?, ?)`
-      )
-      .run(name.trim(), cleanEmail, hashedPassword, "employee");
-
-    const user = db
-      .prepare(
-        "SELECT id, name, email, role, created_at FROM users WHERE id = ?"
-      )
-      .get(result.lastInsertRowid);
+    const result = await db.query(
+      `INSERT INTO users (name, email, password, role)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, name, email, role, created_at`,
+      [name.trim(), cleanEmail, hashedPassword, "employee"]
+    );
 
     res.status(201).json({
       message: "Registration successful.",
-      user,
+      user: result.rows[0],
     });
   } catch (error) {
     console.error(error);
+
+    if (error.code === "23505") {
+      return res.status(409).json({
+        message: "An account with this email already exists.",
+      });
+    }
 
     res.status(500).json({
       message: "Server error during registration.",
@@ -78,9 +82,12 @@ router.post("/login", async (req, res) => {
 
     const cleanEmail = email.trim().toLowerCase();
 
-    const user = db
-      .prepare("SELECT * FROM users WHERE email = ?")
-      .get(cleanEmail);
+    const result = await db.query(
+      "SELECT * FROM users WHERE email = $1",
+      [cleanEmail]
+    );
+
+    const user = result.rows[0];
 
     if (!user) {
       return res.status(401).json({
@@ -88,7 +95,10 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    const passwordMatch = await bcrypt.compare(password, user.password);
+    const passwordMatch = await bcrypt.compare(
+      password,
+      user.password
+    );
 
     if (!passwordMatch) {
       return res.status(401).json({

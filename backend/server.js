@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 
-const db = require("./database");
+const db = require("./database-pg");
 const authRoutes = require("./routes/auth");
 const ticketRoutes = require("./routes/tickets");
 const userRoutes = require("./routes/users");
@@ -14,26 +14,26 @@ const app = express();
 const PORT = process.env.PORT || 5001;
 
 // ==========================================
-// MIDDLEWARE & CORS PREFLIGHT
+// MIDDLEWARE & CORS
 // ==========================================
 
 app.use(
   cors({
-    origin: true, // Dynamically allow incoming origin (localhost:5173, 5174, etc.)
+    origin: true,
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
   })
 );
 
-// Handle preflight OPTIONS requests for all endpoints
 app.options(/.*/, cors());
 
 app.use(express.json());
-// Serve ticket attachments
-const path = require("path");
 
+// Serve ticket attachments.
+const path = require("path");
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
 // ==========================================
 // HEALTH CHECK
 // ==========================================
@@ -55,11 +55,14 @@ app.use("/api/comments", commentRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/knowledge-base", knowledgeBaseRoutes);
 
-// Get single user by ID
-app.get("/api/users/:id", (req, res) => {
+// ==========================================
+// GET SINGLE USER BY ID
+// ==========================================
+
+app.get("/api/users/:id", async (req, res) => {
   try {
-    const user = db
-      .prepare(`
+    const result = await db.query(
+      `
         SELECT
           id,
           name,
@@ -67,9 +70,12 @@ app.get("/api/users/:id", (req, res) => {
           role,
           created_at
         FROM users
-        WHERE id = ?
-      `)
-      .get(req.params.id);
+        WHERE id = $1
+      `,
+      [req.params.id]
+    );
+
+    const user = result.rows[0];
 
     if (!user) {
       return res.status(404).json({
@@ -80,6 +86,7 @@ app.get("/api/users/:id", (req, res) => {
     res.json(user);
   } catch (error) {
     console.error("Failed to load user:", error);
+
     res.status(500).json({
       message: "Failed to load user.",
     });
@@ -109,9 +116,18 @@ app.use((error, req, res, next) => {
 });
 
 // ==========================================
-// START SERVER
+// START SERVER AFTER DATABASE CHECK
 // ==========================================
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`IT ServiceHub API running on port ${PORT}`);
-});
+db.query("SELECT 1")
+  .then(() => {
+    console.log("Neon PostgreSQL connection verified.");
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`IT ServiceHub API running on port ${PORT}`);
+    });
+  })
+  .catch((error) => {
+    console.error("Could not connect to Neon PostgreSQL:", error.message);
+    process.exit(1);
+  });

@@ -1,131 +1,184 @@
 
 const express = require("express");
-const db = require("../database");
+const db = require("../database-pg");
 const { authenticateToken } = require("../middleware/auth");
 
 const router = express.Router();
 
-function getAccessibleTicket(ticketId, user) {
-  const ticket = db
-    .prepare("SELECT * FROM tickets WHERE id = ? OR ticket_number = ?")
-    .get(ticketId, ticketId);
+async function getAccessibleTicket(ticketId, user) {
+  const result = await db.query(
+    `SELECT * FROM tickets
+     WHERE id::text = $1 OR ticket_number = $1
+     LIMIT 1`,
+    [String(ticketId)]
+  );
 
-  if (!ticket) return { error: "Ticket not found.", status: 404 };
+  const ticket = result.rows[0];
+
+  if (!ticket) {
+    return { error: "Ticket not found.", status: 404 };
+  }
 
   const isAdmin = user.role === "admin";
-  const isRequester = Number(ticket.requester_id) === Number(user.id);
+  const isRequester =
+    Number(ticket.requester_id) === Number(user.id);
+
   const isAssignedStaff =
     user.role === "it_staff" &&
     Number(ticket.assigned_to) === Number(user.id);
 
   if (!isAdmin && !isRequester && !isAssignedStaff) {
-    return { error: "You do not have permission to access this ticket.", status: 403 };
+    return {
+      error: "You do not have permission to access this ticket.",
+      status: 403,
+    };
   }
 
   return { ticket };
 }
 
-function getCommentById(id) {
-  return db
-    .prepare(`
-      SELECT
-        ticket_comments.id,
-        ticket_comments.ticket_id,
-        ticket_comments.user_id,
-        ticket_comments.comment,
-        ticket_comments.created_at,
-        users.name AS user_name,
-        users.role AS user_role
-      FROM ticket_comments
-      JOIN users ON ticket_comments.user_id = users.id
-      WHERE ticket_comments.id = ?
-    `)
-    .get(id);
+async function getCommentById(id) {
+  const result = await db.query(
+    `SELECT
+       ticket_comments.id,
+       ticket_comments.ticket_id,
+       ticket_comments.user_id,
+       ticket_comments.comment,
+       ticket_comments.created_at,
+       users.name AS user_name,
+       users.role AS user_role
+     FROM ticket_comments
+     JOIN users ON ticket_comments.user_id = users.id
+     WHERE ticket_comments.id = $1`,
+    [id]
+  );
+
+  return result.rows[0];
 }
 
 // Load comments for an authorized ticket
-router.get("/ticket/:ticketId", authenticateToken, (req, res) => {
+router.get("/ticket/:ticketId", authenticateToken, async (req, res) => {
   try {
-    const access = getAccessibleTicket(req.params.ticketId, req.user);
+    const access = await getAccessibleTicket(
+      req.params.ticketId,
+      req.user
+    );
 
     if (access.error) {
-      return res.status(access.status).json({ message: access.error });
+      return res.status(access.status).json({
+        message: access.error,
+      });
     }
 
-    const comments = db
-      .prepare(`
-        SELECT
-          ticket_comments.id,
-          ticket_comments.ticket_id,
-          ticket_comments.user_id,
-          ticket_comments.comment,
-          ticket_comments.created_at,
-          users.name AS user_name,
-          users.role AS user_role
-        FROM ticket_comments
-        JOIN users ON ticket_comments.user_id = users.id
-        WHERE ticket_comments.ticket_id = ?
-        ORDER BY ticket_comments.created_at ASC, ticket_comments.id ASC
-      `)
-      .all(access.ticket.id);
+    const result = await db.query(
+      `SELECT
+         ticket_comments.id,
+         ticket_comments.ticket_id,
+         ticket_comments.user_id,
+         ticket_comments.comment,
+         ticket_comments.created_at,
+         users.name AS user_name,
+         users.role AS user_role
+       FROM ticket_comments
+       JOIN users ON ticket_comments.user_id = users.id
+       WHERE ticket_comments.ticket_id = $1
+       ORDER BY ticket_comments.created_at ASC,
+                ticket_comments.id ASC`,
+      [access.ticket.id]
+    );
 
-    res.json(comments);
+    res.json(result.rows);
   } catch (error) {
     console.error("Failed to load comments:", error);
-    res.status(500).json({ message: "Failed to load comments." });
+
+    res.status(500).json({
+      message: "Failed to load comments.",
+    });
   }
 });
 
 // Add a comment to an authorized ticket
-router.post("/ticket/:ticketId", authenticateToken, (req, res) => {
+router.post("/ticket/:ticketId", authenticateToken, async (req, res) => {
   try {
-    const access = getAccessibleTicket(req.params.ticketId, req.user);
+    const access = await getAccessibleTicket(
+      req.params.ticketId,
+      req.user
+    );
 
     if (access.error) {
-      return res.status(access.status).json({ message: access.error });
+      return res.status(access.status).json({
+        message: access.error,
+      });
     }
 
     const comment =
-      typeof req.body.comment === "string" ? req.body.comment.trim() : "";
+      typeof req.body.comment === "string"
+        ? req.body.comment.trim()
+        : "";
 
     if (!comment) {
-      return res.status(400).json({ message: "Comment cannot be empty." });
+      return res.status(400).json({
+        message: "Comment cannot be empty.",
+      });
     }
 
     if (comment.length > 5000) {
-      return res.status(400).json({ message: "Comment must be 5,000 characters or fewer." });
+      return res.status(400).json({
+        message: "Comment must be 5,000 characters or fewer.",
+      });
     }
 
-    const result = db
-      .prepare(`
-        INSERT INTO ticket_comments (ticket_id, user_id, comment)
-        VALUES (?, ?, ?)
-      `)
-      .run(access.ticket.id, req.user.id, comment);
+    const result = await db.query(
+      `INSERT INTO ticket_comments (ticket_id, user_id, comment)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [access.ticket.id, req.user.id, comment]
+    );
 
     try {
-      const recipients = [...new Set(
-        [access.ticket.requester_id, access.ticket.assigned_to]
-          .filter(id => id != null).map(Number)
-      )];
-      recipients.forEach(userId => {
-        if (userId === Number(req.user.id)) return;
-        db.prepare("INSERT INTO notifications (user_id, ticket_id, type, title, message) VALUES (?, ?, ?, ?, ?)")
-          .run(userId, access.ticket.id, "ticket_comment",
+      const recipients = [
+        ...new Set(
+          [access.ticket.requester_id, access.ticket.assigned_to]
+            .filter(id => id != null)
+            .map(Number)
+        ),
+      ];
+
+      for (const userId of recipients) {
+        if (userId === Number(req.user.id)) continue;
+
+        await db.query(
+          `INSERT INTO notifications
+             (user_id, ticket_id, type, title, message)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            userId,
+            access.ticket.id,
+            "ticket_comment",
             `New comment on ${access.ticket.ticket_number}`,
-            `${req.user.name || "Someone"} added a comment.`);
-      });
+            `${req.user.name || "Someone"} added a comment.`,
+          ]
+        );
+      }
     } catch (notificationError) {
-      console.error("Comment added, but notification creation failed:", notificationError);
+      console.error(
+        "Comment added, but notification creation failed:",
+        notificationError
+      );
     }
+
+    const newComment = await getCommentById(result.rows[0].id);
 
     res.status(201).json({
       message: "Comment added successfully.",
-      comment: getCommentById(result.lastInsertRowid),
+      comment: newComment,
     });
   } catch (error) {
     console.error("Failed to add comment:", error);
-    res.status(500).json({ message: "Failed to add comment." });
+
+    res.status(500).json({
+      message: "Failed to add comment.",
+    });
   }
 });
 
